@@ -482,7 +482,11 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                 filename = media_data.get("filename", "media")
                 media_type = media_data.get("media_type", "file")
                 if file_bytes:
-                    if media_type in ("image", "sticker", "gif"):
+                    if media_type == "gif":
+                        # GIF 动图：企业微信图片不支持 GIF，改为上传为文件保留动画
+                        wecom_type = "file"
+                        # 不转换，保持原始 GIF 动画
+                    elif media_type in ("image", "sticker"):
                         wecom_type = "image"
                         # 企业微信只支持 jpg/png，所有图片统一用 Pillow 转为标准 JPEG
                         converted = False
