@@ -266,21 +266,32 @@ def compress_image(file_bytes: bytes, max_size: int = WECOM_IMAGE_MAX_SIZE) -> b
 # ============================================================
 # 企业微信媒体上传
 # ============================================================
-def wecom_upload_media(webhook_url: str, file_bytes: bytes, filename: str, file_type: str) -> Optional[str]:
-    """上传媒体到企业微信，返回 media_id"""
+def wecom_upload_media(webhook_url: str, file_bytes: bytes, filename: str, file_type: str) -> tuple:
+    """上传媒体到企业微信，返回 (media_id, error_msg)"""
+    # 根据文件扩展名确定 MIME 类型
+    _mime_map = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".mp4": "video/mp4",
+        ".amr": "audio/amr",
+    }
+    _ext = Path(filename).suffix.lower()
+    content_type = _mime_map.get(_ext, "application/octet-stream")
     try:
         # 从 webhook URL 提取 key
         parsed = urllib.parse.urlparse(webhook_url)
         qs = urllib.parse.parse_qs(parsed.query)
         key = qs.get("key", [""])[0]
         if not key:
-            return None
+            return None, "无法从 webhook URL 中提取 key 参数"
         upload_url = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/upload_media?key={key}&type={file_type}"
         boundary = "----WebKitFormBoundary" + secrets.token_hex(8)
         body = BytesIO()
         body.write(f"--{boundary}\r\n".encode())
         body.write(f'Content-Disposition: form-data; name="media"; filename="{filename}"\r\n'.encode())
-        body.write(f"Content-Type: application/octet-stream\r\n\r\n".encode())
+        body.write(f"Content-Type: {content_type}\r\n\r\n".encode())
         body.write(file_bytes)
         body.write(f"\r\n--{boundary}--\r\n".encode())
         data = body.getvalue()
@@ -292,14 +303,12 @@ def wecom_upload_media(webhook_url: str, file_bytes: bytes, filename: str, file_
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode())
             if result.get("errcode") == 0:
-                return result.get("media_id")
-            logger.warning(f"企业微信上传媒体失败: {json.dumps(result, ensure_ascii=False)}")
-            return None
+                return result.get("media_id"), None
+            err_msg = json.dumps(result, ensure_ascii=False)
+            return None, f"企业微信上传媒体失败: {err_msg}"
     except Exception as e:
-        logger.warning(f"企业微信上传媒体异常: {e}")
         import traceback
-        logger.warning(traceback.format_exc())
-        return None
+        return None, f"企业微信上传媒体异常: {e}\n{traceback.format_exc()}"
 
 
 def wecom_send_media(webhook_url: str, media_id: str, msgtype: str):
@@ -482,7 +491,11 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                         wecom_type = "file"
                     if not file_bytes:
                         continue
-                    mid = await asyncio.to_thread(wecom_upload_media, url, file_bytes, filename, wecom_type)
+                    file_size_mb = len(file_bytes) / (1024 * 1024)
+                    logger.info(f"  Webhook [{idx}] 准备上传 {filename} (type={wecom_type}, size={file_size_mb:.2f}MB)")
+                    mid, err_msg = await asyncio.to_thread(wecom_upload_media, url, file_bytes, filename, wecom_type)
+                    if err_msg:
+                        logger.warning(f"  Webhook [{idx}] {err_msg}")
                     if mid:
                         ok2, err2 = await asyncio.to_thread(wecom_send_media, url, mid, wecom_type)
                         if ok2:
