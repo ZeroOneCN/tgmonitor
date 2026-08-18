@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>初始化设置 - Telegram 群聊频道消息监控后台</title>
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+  background: #f5f6fa;
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.setup-box {
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+  padding: 40px 32px;
+  width: 100%;
+  max-width: 420px;
+}
+.logo-area {
+  text-align: center;
+  margin-bottom: 24px;
+}
+.logo-area img {
+  width: 48px;
+  height: 48px;
+  margin-bottom: 12px;
+}
+.logo-area h1 {
+  font-size: 22px;
+  font-weight: 600;
+  color: #2d3436;
+}
+.desc {
+  background: #e3f2fd;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 28px;
+}
+.desc p {
+  font-size: 13px;
+  color: #1565c0;
+  line-height: 1.6;
+}
+.form-group {
+  margin-bottom: 20px;
+}
+.form-group label {
+  display: block;
+  font-size: 14px;
+  font-weight: 500;
+  color: #2d3436;
+  margin-bottom: 8px;
+}
+.form-group input {
+  width: 100%;
+  padding: 12px 14px;
+  border: 1px solid #e0e0e0;
+  border-radius: 6px;
+  font-size: 15px;
+  transition: border-color 0.2s;
+  outline: none;
+}
+.form-group input:focus {
+  border-color: #4A90D9;
+}
+.hint {
+  font-size: 12px;
+  color: #636e72;
+  margin-top: 4px;
+}
+.btn-setup {
+  width: 100%;
+  padding: 13px;
+  background: #27ae60;
+  color: #fff;
+  border: none;
+  border-radius: 6px;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.btn-setup:hover {
+  background: #219a52;
+}
+.btn-setup:active {
+  background: #1e8449;
+}
+.btn-setup:disabled {
+  background: #a5d6a7;
+  cursor: not-allowed;
+}
+.error-msg {
+  color: #e74c3c;
+  font-size: 13px;
+  margin-top: 16px;
+  text-align: center;
+  display: none;
+}
+.error-msg.show {
+  display: block;
+}
+.success-msg {
+  color: #27ae60;
+  font-size: 13px;
+  margin-top: 16px;
+  text-align: center;
+  display: none;
+}
+.success-msg.show {
+  display: block;
+}
+</style>
+</head>
+<body>
+<div class="setup-box">
+  <div class="logo-area">
+    <img src="/logo.svg" alt="Logo">
+    <h1>初始化管理员账号</h1>
+  </div>
+  <div class="desc">
+    <p>欢迎使用 Telegram 群聊频道监控工具！</p>
+    <p style="margin-top: 8px;">请设置管理员账号和密码，用于登录 Web 管理后台。</p>
+  </div>
+  <form id="setupForm">
+    <div class="form-group">
+      <label>用户名</label>
+      <input type="text" id="username" placeholder="例如: admin" value="admin" autocomplete="username">
+      <div class="hint">登录后台使用的用户名</div>
+    </div>
+    <div class="form-group">
+      <label>密码</label>
+      <input type="password" id="password" placeholder="请设置密码" autocomplete="new-password">
+      <div class="hint">密码长度至少 6 位</div>
+    </div>
+    <div class="form-group">
+      <label>确认密码</label>
+      <input type="password" id="confirmPassword" placeholder="请再次输入密码" autocomplete="new-password">
+    </div>
+    <button type="submit" class="btn-setup" id="submitBtn">创建管理员账号</button>
+    <div class="error-msg" id="errorMsg"></div>
+    <div class="success-msg" id="successMsg"></div>
+  </form>
+</div>
+
+<script>
+document.getElementById('setupForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  const confirmPassword = document.getElementById('confirmPassword').value;
+  const submitBtn = document.getElementById('submitBtn');
+  const errorMsg = document.getElementById('errorMsg');
+  const successMsg = document.getElementById('successMsg');
+
+  errorMsg.classList.remove('show');
+  successMsg.classList.remove('show');
+
+  if (!username || !password) {
+    errorMsg.textContent = '请填写用户名和密码';
+    errorMsg.classList.add('show');
+    return;
+  }
+  if (password.length < 6) {
+    errorMsg.textContent = '密码长度至少 6 位';
+    errorMsg.classList.add('show');
+    return;
+  }
+  if (password !== confirmPassword) {
+    errorMsg.textContent = '两次输入的密码不一致';
+    errorMsg.classList.add('show');
+    return;
+  }
+
+  submitBtn.disabled = true;
+  submitBtn.textContent = '创建中...';
+
+  try {
+    const res = await fetch('/api/setup', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, password})
+    });
+    const data = await res.json();
+    if (data.status === 'ok') {
+      successMsg.textContent = data.message + '，3 秒后跳转到登录页...';
+      successMsg.classList.add('show');
+      setTimeout(() => {
+        window.location.href = '/login';
+      }, 3000);
+    } else {
+      errorMsg.textContent = data.message || '创建失败';
+      errorMsg.classList.add('show');
+      submitBtn.disabled = false;
+      submitBtn.textContent = '创建管理员账号';
+    }
+  } catch (err) {
+    errorMsg.textContent = '网络错误，请重试';
+    errorMsg.classList.add('show');
+    submitBtn.disabled = false;
+    submitBtn.textContent = '创建管理员账号';
+  }
+});
+</script>
+</body>
+</html>

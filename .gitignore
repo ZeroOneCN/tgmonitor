@@ -1,0 +1,36 @@
+# 敏感配置
+config.json
+
+# Telegram session 文件
+session_*.session
+session_*.session-journal
+
+# 数据库
+history.db
+
+# 日志文件
+*.log
+logs/
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+
+# 虚拟环境
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# 系统
+.DS_Store
+Thumbs.db

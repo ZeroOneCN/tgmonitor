@@ -1,0 +1,1245 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Telegram 群聊频道消息监控后台</title>
+<link rel="icon" type="image/svg+xml" href="/logo.svg">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+  background: #f5f6fa; color: #2d3436; min-height: 100vh;
+}
+
+/* 顶部导航 */
+header {
+  background: #fff; padding: 0 24px; display: flex;
+  align-items: center; justify-content: space-between;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08); height: 56px;
+  position: sticky; top: 0; z-index: 100;
+}
+header h1 {
+  font-size: 18px; font-weight: 600; color: #2d3436;
+  letter-spacing: 0.5px; display: flex; align-items: center; gap: 10px;
+}
+header h1 img { width: 28px; height: 28px; }
+header h1 span { color: #4A90D9; }
+nav { display: flex; gap: 2px; height: 100%; }
+.tab-btn {
+  background: transparent; color: #636e72; border: none;
+  padding: 0 20px; cursor: pointer; font-size: 14px;
+  font-weight: 500; transition: all 0.2s;
+  border-bottom: 2px solid transparent;
+}
+.tab-btn:hover { color: #4A90D9; background: #f0f4ff; }
+.tab-btn.active { color: #4A90D9; border-bottom-color: #4A90D9; }
+
+/* 主内容 */
+main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* 账号卡片 */
+.account-card {
+  background: #fff; border-radius: 10px; padding: 20px; margin-bottom: 14px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06); border: 1px solid #e8eaed;
+  transition: box-shadow 0.2s;
+}
+.account-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+.account-header {
+  display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;
+}
+.account-left { display: flex; align-items: center; gap: 12px; }
+.account-name { font-size: 16px; font-weight: 600; color: #2d3436; }
+.account-name .phone { font-weight: 400; font-size: 13px; color: #b2bec3; margin-left: 8px; }
+.status-badge {
+  display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500;
+}
+.status-running { background: #e8f5e9; color: #2e7d32; }
+.status-stopped { background: #f3e5f5; color: #7b1fa2; }
+.status-loggedin { background: #e3f2fd; color: #1565c0; }
+.status-nosession { background: #fff3e0; color: #e65100; }
+.account-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.account-body { margin-top: 12px; }
+.proxy-info { font-size: 13px; color: #636e72; margin-bottom: 10px; }
+
+/* 规则列表 */
+.rule-list { margin-top: 8px; }
+.rule-item {
+  background: #f8f9fa; border-radius: 8px; padding: 10px 14px; margin-bottom: 6px;
+  display: flex; align-items: center; justify-content: space-between;
+  border: 1px solid #e8eaed;
+}
+.rule-item .rule-info { flex: 1; }
+.rule-item .rule-name { font-size: 14px; font-weight: 500; color: #2d3436; }
+.rule-item .rule-detail { font-size: 12px; color: #636e72; margin-top: 3px; }
+.rule-item .rule-actions { display: flex; gap: 4px; }
+
+/* 按钮系统 */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 7px 16px; border: none; border-radius: 6px; cursor: pointer;
+  font-size: 13px; font-weight: 500; transition: all 0.2s;
+  white-space: nowrap; gap: 4px;
+}
+.btn-primary { background: #4A90D9; color: #fff; }
+.btn-primary:hover { background: #357abd; }
+.btn-primary:active { background: #2a6cb5; }
+.btn-success { background: #27ae60; color: #fff; }
+.btn-success:hover { background: #219a52; }
+.btn-danger { background: #e74c3c; color: #fff; }
+.btn-danger:hover { background: #c0392b; }
+.btn-warning { background: #f39c12; color: #fff; }
+.btn-warning:hover { background: #d68910; }
+.btn-secondary { background: #e8eaed; color: #2d3436; }
+.btn-secondary:hover { background: #d5d8dc; }
+.btn-sm { padding: 5px 12px; font-size: 12px; }
+.btn-outline {
+  background: transparent; color: #4A90D9; border: 1px solid #4A90D9;
+}
+.btn-outline:hover { background: #f0f4ff; }
+.btn-outline-sm {
+  background: transparent; color: #636e72; border: 1px solid #d5d8dc;
+  padding: 4px 10px; font-size: 12px; border-radius: 5px; cursor: pointer;
+}
+.btn-outline-sm:hover { border-color: #4A90D9; color: #4A90D9; }
+.toolbar { margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* 日志区域 */
+#log-container {
+  background: #fff; border-radius: 10px; padding: 16px; height: 500px;
+  overflow-y: auto; font-family: "SF Mono", "Fira Code", "Cascadia Code", monospace;
+  font-size: 13px; line-height: 1.7; border: 1px solid #e8eaed;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+#log-output { white-space: pre-wrap; word-break: break-all; }
+.log-line { padding: 1px 0; color: #2d3436; }
+.log-line.INFO { color: #4A90D9; }
+.log-line.WARNING { color: #f39c12; }
+.log-line.ERROR { color: #e74c3c; }
+.log-line.DEBUG { color: #b2bec3; }
+.log-actions { display: flex; gap: 8px; margin-top: 10px; }
+
+/* 设置页 */
+.settings-section {
+  background: #fff; border-radius: 10px; padding: 24px; margin-bottom: 16px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06); border: 1px solid #e8eaed;
+}
+.settings-section h3 { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #2d3436; }
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 5px; color: #2d3436; }
+.form-group label .required { color: #e74c3c; margin-left: 2px; }
+.form-group label .hint { font-weight: 400; color: #b2bec3; font-size: 12px; margin-left: 6px; }
+.form-control {
+  width: 100%; padding: 9px 12px; border: 1px solid #d5d8dc; border-radius: 6px;
+  background: #fff; color: #2d3436; font-size: 14px; outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+.form-control:focus { border-color: #4A90D9; box-shadow: 0 0 0 3px rgba(74,144,217,0.12); }
+.form-control::placeholder { color: #b2bec3; }
+.form-row { display: flex; gap: 14px; }
+.form-row .form-group { flex: 1; }
+.form-check { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.form-check input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: #4A90D9; }
+.form-check label { font-size: 14px; cursor: pointer; user-select: none; }
+
+/* 模态框 */
+.modal-overlay {
+  display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.35);
+  z-index: 1000; justify-content: center; align-items: center;
+  animation: fadeIn 0.15s ease;
+}
+.modal-overlay.active { display: flex; }
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.modal {
+  background: #fff; border-radius: 12px; padding: 28px; width: 520px;
+  max-width: 92vw; max-height: 85vh; overflow-y: auto;
+  box-shadow: 0 8px 30px rgba(0,0,0,0.15); position: relative;
+  animation: slideUp 0.2s ease;
+}
+@keyframes slideUp { from { transform: translateY(10px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+.modal h2 { font-size: 17px; font-weight: 600; margin-bottom: 20px; color: #2d3436; }
+.modal-close {
+  position: absolute; top: 14px; right: 18px; background: none; border: none;
+  color: #b2bec3; font-size: 24px; cursor: pointer; line-height: 1;
+}
+.modal-close:hover { color: #2d3436; }
+.modal-footer { margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; }
+.modal-footer .btn { min-width: 80px; padding: 8px 20px; }
+hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
+
+/* 空状态 */
+.empty-state { text-align: center; padding: 40px 20px; color: #b2bec3; font-size: 14px; }
+.empty-state .icon { font-size: 40px; margin-bottom: 10px; display: block; }
+
+/* 辅助 */
+.text-sm { font-size: 12px; color: #b2bec3; }
+.mt-8 { margin-top: 8px; }
+.mb-8 { margin-bottom: 8px; }
+.flex { display: flex; }
+.flex-wrap { flex-wrap: wrap; }
+.items-center { align-items: center; }
+.gap-4 { gap: 4px; }
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: #f5f6fa; }
+::-webkit-scrollbar-thumb { background: #d5d8dc; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #b2bec3; }
+
+/* 响应式 */
+@media (max-width: 640px) {
+  header { flex-direction: column; height: auto; padding: 10px 16px; gap: 6px; }
+  nav { width: 100%; justify-content: center; }
+  .tab-btn { flex: 1; text-align: center; font-size: 13px; padding: 8px 4px; }
+  main { padding: 16px; }
+  .account-header { flex-direction: column; align-items: flex-start; gap: 10px; }
+  .account-actions { width: 100%; }
+  .modal { padding: 20px; width: 95vw; }
+  .form-row { flex-direction: column; gap: 0; }
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1><img src="/logo.svg" alt="Telegram"> Telegram 群聊频道消息监控后台</h1>
+  <nav>
+    <button class="tab-btn active" onclick="switchTab('accounts')">账号管理</button>
+    <button class="tab-btn" onclick="switchTab('history')">历史消息</button>
+    <button class="tab-btn" onclick="switchTab('logs')">实时日志</button>
+    <button class="tab-btn" onclick="switchTab('settings')">设置</button>
+  </nav>
+  <button class="btn btn-sm btn-secondary" onclick="logout()" style="flex-shrink:0;" title="退出登录">退出</button>
+</header>
+
+<main>
+  <!-- 账号管理 -->
+  <section id="tab-accounts" class="tab-content active">
+    <div class="toolbar">
+      <button class="btn btn-primary" onclick="showAddAccount()">+ 添加账号</button>
+      <button class="btn btn-secondary" onclick="loadAccounts()">刷新状态</button>
+    </div>
+    <div id="account-list"></div>
+  </section>
+
+  <!-- 实时日志 -->
+  <section id="tab-logs" class="tab-content">
+    <div id="log-container"><div id="log-output"></div></div>
+    <div class="log-actions">
+      <button class="btn btn-secondary btn-sm" onclick="clearLogs()">清空日志</button>
+      <button class="btn btn-secondary btn-sm" id="scroll-btn" onclick="toggleAutoScroll()">自动滚动 ✓</button>
+    </div>
+  </section>
+
+  <!-- 设置 -->
+  <section id="tab-settings" class="tab-content">
+    <div class="settings-section">
+      <h3>Webhook 推送设置</h3>
+      <p class="text-sm mb-8">匹配到消息时通过 Webhook 发送通知到手机，两种方式可选（填其中一种即可）。</p>
+      <div id="webhook-list"></div>
+      <button class="btn btn-outline btn-sm mt-8" onclick="addWebhookRow()">+ 添加一条 Webhook</button>
+      <div class="modal-footer mt-8" style="border-top: 1px solid #e8eaed; padding-top: 16px;">
+        <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 历史消息 -->
+  <section id="tab-history" class="tab-content">
+    <div class="settings-section">
+      <h3>历史消息记录</h3>
+      <div class="form-row" style="align-items: end; flex-wrap: wrap;">
+        <div class="form-group">
+          <label>账号</label>
+          <select class="form-control" id="history-account" onchange="loadHistory()">
+            <option value="-1">全部账号</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>开始日期</label>
+          <input type="date" class="form-control" id="history-date-from" onchange="loadHistory()">
+        </div>
+        <div class="form-group">
+          <label>结束日期</label>
+          <input type="date" class="form-control" id="history-date-to" onchange="loadHistory()">
+        </div>
+        <div class="form-group">
+          <label>关键词</label>
+          <input class="form-control" id="history-keyword" placeholder="搜索消息/发送者/群组" onkeyup="if(event.key==='Enter')loadHistory()">
+        </div>
+        <div class="form-group">
+          <button class="btn btn-primary" onclick="loadHistory()" style="margin-top:6px;">查询</button>
+          <button class="btn btn-secondary" onclick="resetHistoryFilter()" style="margin-top:6px;">重置</button>
+        </div>
+      </div>
+    </div>
+    <div id="history-list" class="settings-section" style="padding: 16px;">
+      <div class="empty-state"><span class="icon">&#128196;</span>请选择筛选条件后查询</div>
+    </div>
+    <div id="history-pagination" class="flex items-center gap-4" style="justify-content: center; margin-top: 12px; display: none;"></div>
+  </section>
+</main>
+
+<!-- 添加/编辑账号模态框 -->
+<div class="modal-overlay" id="account-modal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('account-modal')">&times;</button>
+    <h2 id="account-modal-title">添加账号</h2>
+    <div class="form-group">
+      <label>备注名 <span class="required">*</span></label>
+      <input class="form-control" id="acc-remark" placeholder="例如：PildlElin">
+    </div>
+    <div class="form-group">
+      <label>手机号 <span class="required">*</span></label>
+      <input class="form-control" id="acc-phone" placeholder="例如：+573013930801">
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>api_id <span class="required">*</span></label>
+        <input class="form-control" id="acc-api-id" placeholder="例如：2040">
+      </div>
+      <div class="form-group">
+        <label>api_hash <span class="required">*</span></label>
+        <input class="form-control" id="acc-api-hash" placeholder="例如：b18441a1ff607e10a989891a5462e627">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>代理协议</label>
+        <input class="form-control" id="acc-proxy-scheme" placeholder="socks5">
+      </div>
+      <div class="form-group">
+        <label>代理地址</label>
+        <input class="form-control" id="acc-proxy-host" placeholder="127.0.0.1">
+      </div>
+      <div class="form-group">
+        <label>端口</label>
+        <input class="form-control" id="acc-proxy-port" placeholder="10090">
+      </div>
+    </div>
+    <input type="hidden" id="acc-edit-idx" value="-1">
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('account-modal')">取消</button>
+      <button class="btn btn-primary" onclick="saveAccount()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 添加/编辑规则模态框 -->
+<div class="modal-overlay" id="rule-modal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('rule-modal')">&times;</button>
+    <h2 id="rule-modal-title">添加规则</h2>
+    <div class="form-group">
+      <label>规则名称 <span class="required">*</span></label>
+      <input class="form-control" id="rule-remark" placeholder="例如：监控群A的用户X">
+    </div>
+    <div class="form-group">
+      <label>目标 User ID <span class="hint">留空 = 监控所有用户</span></label>
+      <input class="form-control" id="rule-user-ids" placeholder="例如：123456789, 987654321">
+    </div>
+    <div class="form-group">
+      <label>目标用户名 <span class="hint">留空 = 不按用户名过滤</span></label>
+      <input class="form-control" id="rule-usernames" placeholder="例如：username1, username2">
+    </div>
+    <div class="form-group">
+      <label>监听的 Chat ID <span class="hint">留空 = 所有聊天</span></label>
+      <input class="form-control" id="rule-chat-ids" placeholder="例如：-1001234567890">
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>包含关键词</label>
+        <input class="form-control" id="rule-keys-include" placeholder="例如：报警, 紧急, 重要">
+      </div>
+      <div class="form-group">
+        <label>排除关键词</label>
+        <input class="form-control" id="rule-keys-exclude" placeholder="例如：测试, 忽略">
+      </div>
+    </div>
+    <div class="form-check">
+      <input type="checkbox" id="rule-forward-saved" checked>
+      <label for="rule-forward-saved">转发到 Saved Messages</label>
+    </div>
+    <hr>
+    <div class="form-check">
+      <input type="checkbox" id="rule-webhook-enabled">
+      <label for="rule-webhook-enabled">Webhook 通知（覆盖全局设置）</label>
+    </div>
+    <div class="form-group">
+      <label>Webhook URL <span class="hint">方式B：通用Webhook</span></label>
+      <input class="form-control" id="rule-webhook-url" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>Bot Token <span class="hint">方式A</span></label>
+        <input class="form-control" id="rule-webhook-bot-token" placeholder="123456:ABC-DEF...">
+      </div>
+      <div class="form-group">
+        <label>Bot Chat ID <span class="hint">方式A</span></label>
+        <input class="form-control" id="rule-webhook-chat-id" placeholder="你的 user_id">
+      </div>
+    </div>
+    <input type="hidden" id="rule-account-idx" value="-1">
+    <input type="hidden" id="rule-edit-idx" value="-1">
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('rule-modal')">取消</button>
+      <button class="btn btn-primary" onclick="saveRule()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 登录验证码模态框 -->
+<div class="modal-overlay" id="login-code-modal">
+  <div class="modal" style="max-width: 400px;">
+    <button class="modal-close" onclick="cancelLogin()">&times;</button>
+    <h2>请输入验证码</h2>
+    <p class="text-sm mb-8">Telegram 已发送验证码到你的手机</p>
+    <div class="form-group">
+      <label>验证码 <span class="required">*</span></label>
+      <input class="form-control" id="login-code-input" placeholder="例如：12345" style="font-size: 20px; letter-spacing: 6px; text-align: center;">
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="cancelLogin()">取消</button>
+      <button class="btn btn-primary" onclick="submitLoginCode()">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- 登录密码模态框 -->
+<div class="modal-overlay" id="login-password-modal">
+  <div class="modal" style="max-width: 400px;">
+    <button class="modal-close" onclick="cancelLogin()">&times;</button>
+    <h2>请输入两步验证密码</h2>
+    <p class="text-sm mb-8">该账号开启了两步验证，请输入密码完成登录</p>
+    <div class="form-group">
+      <label>密码 <span class="required">*</span></label>
+      <input class="form-control" id="login-password-input" type="password" placeholder="输入两步验证密码">
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="cancelLogin()">取消</button>
+      <button class="btn btn-primary" onclick="submitLoginPassword()">确认</button>
+    </div>
+  </div>
+</div>
+
+<!-- 自定义弹窗 (Alert / Confirm) -->
+<div class="modal-overlay" id="dialog-modal">
+  <div class="modal" style="max-width: 400px; min-height: 160px;">
+    <button class="modal-close" onclick="closeDialog(false)">&times;</button>
+    <h2 id="dialog-title">提示</h2>
+    <p id="dialog-message" style="font-size: 14px; line-height: 1.6; color: #636e72; margin: 16px 0 24px;"></p>
+    <div class="modal-footer" id="dialog-footer">
+      <button class="btn btn-primary" id="dialog-confirm-btn" onclick="closeDialog(true)">确定</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ============================================================
+// 状态
+// ============================================================
+let currentLoginIdx = -1;
+let autoScroll = true;
+let _dialogResolve = null;
+
+// ============================================================
+// 自定义弹窗
+// ============================================================
+function showAlert(message) {
+  document.getElementById('dialog-title').textContent = '提示';
+  document.getElementById('dialog-message').textContent = message;
+  document.getElementById('dialog-confirm-btn').onclick = () => closeDialog(true);
+  document.getElementById('dialog-confirm-btn').textContent = '确定';
+  const cancelBtn = document.getElementById('dialog-cancel-btn');
+  if (cancelBtn) cancelBtn.style.display = 'none';
+  _dialogResolve = null;
+  openModal('dialog-modal');
+}
+
+function showConfirm(message) {
+  return new Promise(resolve => {
+    _dialogResolve = resolve;
+    document.getElementById('dialog-title').textContent = '确认';
+    document.getElementById('dialog-message').textContent = message;
+    document.getElementById('dialog-confirm-btn').onclick = () => closeDialog(true);
+    document.getElementById('dialog-confirm-btn').textContent = '确定';
+    let cancelBtn = document.getElementById('dialog-cancel-btn');
+    if (!cancelBtn) {
+      cancelBtn = document.createElement('button');
+      cancelBtn.id = 'dialog-cancel-btn';
+      cancelBtn.className = 'btn btn-secondary';
+      cancelBtn.textContent = '取消';
+      document.getElementById('dialog-footer').appendChild(cancelBtn);
+    }
+    cancelBtn.onclick = () => closeDialog(false);
+    cancelBtn.style.display = 'inline-flex';
+    openModal('dialog-modal');
+  });
+}
+
+function closeDialog(result) {
+  closeModal('dialog-modal');
+  if (_dialogResolve) {
+    _dialogResolve(result);
+    _dialogResolve = null;
+  }
+}
+
+// ============================================================
+// Tab 切换
+// ============================================================
+function switchTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  const btn = document.querySelector(`.tab-btn[onclick*="${name}"]`);
+  if (btn) btn.classList.add('active');
+  document.getElementById(`tab-${name}`).classList.add('active');
+  if (name === 'accounts') loadAccounts();
+  if (name === 'settings') loadSettings();
+}
+
+// ============================================================
+// 模态框
+// ============================================================
+function openModal(id) { document.getElementById(id).classList.add('active'); }
+function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+
+// ============================================================
+// API 工具
+// ============================================================
+async function api(method, url, body) {
+  const opts = { method, headers: { 'Content-Type': 'application/json' } };
+  if (body) opts.body = JSON.stringify(body);
+  const res = await fetch(url, opts);
+  if (!res.ok) {
+    let detail = `HTTP ${res.status}`;
+    try { const j = await res.json(); detail = j.detail || detail; } catch {}
+    throw new Error(detail);
+  }
+  return res.json();
+}
+
+// ============================================================
+// 账号管理
+// ============================================================
+async function loadAccounts() {
+  const el = document.getElementById('account-list');
+  el.innerHTML = '<div class="empty-state"><span class="icon">&#8987;</span>加载中...</div>';
+  try {
+    const accounts = await api('GET', '/api/accounts');
+    if (accounts.length === 0) {
+      el.innerHTML = '<div class="empty-state"><span class="icon">&#128235;</span>暂无账号<br>点击上方"添加账号"开始配置</div>';
+      return;
+    }
+    el.innerHTML = accounts.map((acc, i) => renderAccountCard(acc, i)).join('');
+  } catch (e) {
+    el.innerHTML = `<div class="empty-state" style="color:#e74c3c">加载失败: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function renderAccountCard(acc, idx) {
+  const running = acc.running;
+  const sessionValid = acc.session_valid;
+  const sessionName = acc.session_name || '';
+
+  let statusBadge, statusText, statusClass;
+  if (running) {
+    statusBadge = 'running'; statusText = '&#x1F7E2; 监控中'; statusClass = 'status-running';
+  } else if (sessionValid) {
+    statusBadge = 'loggedin'; statusText = '&#x1F535; 已登录'; statusClass = 'status-loggedin';
+  } else {
+    statusBadge = 'nosession'; statusText = '&#x26AA; 未登录'; statusClass = 'status-nosession';
+  }
+
+  const proxy = acc.proxy || {};
+  const proxyText = proxy.scheme && proxy.host && proxy.port
+    ? `${proxy.scheme}://${proxy.host}:${proxy.port}`
+    : '未配置';
+  const rules = acc.rules || [];
+
+  const ruleHtml = rules.length > 0
+    ? '<div class="rule-list">' + rules.map((r, ri) => `
+      <div class="rule-item">
+        <div class="rule-info">
+          <div class="rule-name">${escHtml(r.remark || '未命名')}</div>
+          <div class="rule-detail">${ruleDetail(r)}</div>
+        </div>
+        <div class="rule-actions">
+          <button class="btn-outline-sm" onclick="editRule(${idx}, ${ri})">编辑</button>
+          <button class="btn-outline-sm" style="color:#e74c3c;border-color:#e74c3c;" onclick="deleteRule(${idx}, ${ri})">删除</button>
+        </div>
+      </div>
+    `).join('') + '</div>'
+    : '<div class="text-sm" style="padding: 8px 0;">暂无规则</div>';
+
+  const sessionLabel = sessionValid
+    ? `<span style="font-size:12px;color:#636e72;margin-left:8px;">${escHtml(sessionName)}</span>`
+    : '';
+
+  return `
+    <div class="account-card">
+      <div class="account-header">
+        <div class="account-left">
+          <div>
+            <span class="account-name">${escHtml(acc.remark || '未命名')} <span class="phone">${escHtml(acc.phone || '')}</span>${sessionLabel}</span>
+          </div>
+          <span class="status-badge ${statusClass}">${statusText}</span>
+        </div>
+        <div class="account-actions">
+          <button class="btn btn-sm btn-secondary" onclick="editAccount(${idx})">编辑</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteAccount(${idx})">删除</button>
+          ${running
+            ? `<button class="btn btn-sm btn-warning" onclick="stopMonitor(${idx})">停止</button>`
+            : sessionValid
+              ? `<button class="btn btn-sm btn-success" onclick="startMonitor(${idx})">启动监控</button>`
+              : `<button class="btn btn-sm btn-primary" onclick="loginAccount(${idx})">登录</button>`
+          }
+        </div>
+      </div>
+      <div class="proxy-info">代理: ${proxyText}</div>
+      ${ruleHtml}
+      <button class="btn btn-outline btn-sm mt-8" onclick="showAddRule(${idx})">+ 添加规则</button>
+    </div>
+  `;
+}
+
+function ruleDetail(rule) {
+  const parts = [];
+  const ids = (rule.target_user_ids || []).filter(v => v !== '' && v !== null);
+  const names = (rule.target_usernames || []).filter(Boolean);
+  const chats = (rule.chat_ids || []).filter(v => v !== '' && v !== null);
+  if (ids.length > 0) parts.push(`用户: ${ids.join(', ')}`);
+  else if (names.length > 0) parts.push(`用户: ${names.join(', ')}`);
+  else parts.push('用户: 所有');
+  if (chats.length > 0) parts.push(`聊天: ${chats.join(', ')}`);
+  else parts.push('聊天: 所有');
+  if (rule.keywords_include?.length > 0) parts.push(`包含: ${rule.keywords_include.join(', ')}`);
+  if (rule.keywords_exclude?.length > 0) parts.push(`排除: ${rule.keywords_exclude.join(', ')}`);
+  return parts.join(' | ');
+}
+
+function escHtml(s) {
+  if (s == null) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ============================================================
+// 添加/编辑账号
+// ============================================================
+function showAddAccount() {
+  document.getElementById('account-modal-title').textContent = '添加账号';
+  document.getElementById('acc-edit-idx').value = '-1';
+  ['acc-remark','acc-phone','acc-api-hash'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('acc-api-id').value = '2040';
+  document.getElementById('acc-proxy-scheme').value = '';
+  document.getElementById('acc-proxy-host').value = '';
+  document.getElementById('acc-proxy-port').value = '';
+  openModal('account-modal');
+}
+
+function editAccount(idx) {
+  document.getElementById('account-modal-title').textContent = '编辑账号';
+  document.getElementById('acc-edit-idx').value = idx;
+  api('GET', '/api/accounts').then(accounts => {
+    const acc = accounts[idx];
+    document.getElementById('acc-remark').value = acc.remark || '';
+    document.getElementById('acc-phone').value = acc.phone || '';
+    document.getElementById('acc-api-id').value = acc.api_id || '';
+    document.getElementById('acc-api-hash').value = acc.api_hash || '';
+    const proxy = acc.proxy || {};
+    document.getElementById('acc-proxy-scheme').value = proxy.scheme || '';
+    document.getElementById('acc-proxy-host').value = proxy.host || '';
+    document.getElementById('acc-proxy-port').value = proxy.port || '';
+    openModal('account-modal');
+  });
+}
+
+async function saveAccount() {
+  const remark = document.getElementById('acc-remark').value.trim();
+  const phone = document.getElementById('acc-phone').value.trim();
+  const api_id = document.getElementById('acc-api-id').value.trim();
+  const api_hash = document.getElementById('acc-api-hash').value.trim();
+  const idx = parseInt(document.getElementById('acc-edit-idx').value);
+
+  if (!remark) { showAlert('请输入备注名'); return; }
+  if (!phone) { showAlert('请输入手机号'); return; }
+  if (!api_id) { showAlert('请输入 api_id'); return; }
+  if (!api_hash) { showAlert('请输入 api_hash'); return; }
+
+  const data = {
+    remark, phone, api_id: parseInt(api_id) || 2040, api_hash,
+    proxy: {
+      scheme: document.getElementById('acc-proxy-scheme').value.trim() || 'socks5',
+      host: document.getElementById('acc-proxy-host').value.trim() || '127.0.0.1',
+      port: parseInt(document.getElementById('acc-proxy-port').value) || 10090,
+      username: '', password: '',
+    },
+  };
+
+  try {
+    if (idx === -1) {
+      await api('POST', '/api/accounts', data);
+    } else {
+      await api('PUT', `/api/accounts/${idx}`, data);
+    }
+    closeModal('account-modal');
+    loadAccounts();
+  } catch (e) {
+    showAlert('保存失败: ' + e.message);
+  }
+}
+
+async function deleteAccount(idx) {
+  if (!await showConfirm('确定删除该账号？')) return;
+  try {
+    await api('DELETE', `/api/accounts/${idx}`);
+    loadAccounts();
+  } catch (e) {
+    showAlert('删除失败: ' + e.message);
+  }
+}
+
+// ============================================================
+// 登录流程
+// ============================================================
+async function loginAccount(idx) {
+  currentLoginIdx = idx;
+  try {
+    const res = await api('POST', `/api/accounts/${idx}/login`, {});
+    if (res.status === 'ok') {
+      // 登录成功：立即局部更新卡片 + 后台刷新
+      markCardSessionValid(idx);
+      setTimeout(loadAccounts, 300);
+    } else if (res.status === 'need_code') {
+      document.getElementById('login-code-input').value = '';
+      openModal('login-code-modal');
+    } else if (res.status === 'need_password') {
+      document.getElementById('login-password-input').value = '';
+      openModal('login-password-modal');
+    } else {
+      showAlert('登录失败: ' + (res.message || '未知错误'));
+    }
+  } catch (e) {
+    showAlert('登录失败: ' + e.message);
+  }
+}
+
+// 将已渲染的卡片强制标记为"已登录"状态，避免等待 loadAccounts 刷新延迟
+function markCardSessionValid(idx, displayName) {
+  const card = document.querySelectorAll('.account-card')[idx];
+  if (!card) return;
+  const badge = card.querySelector('.status-badge');
+  if (badge) {
+    badge.className = 'status-badge status-loggedin';
+    badge.innerHTML = '&#x1F535; 已登录';
+  }
+  const btnBar = card.querySelector('.account-actions');
+  if (btnBar) {
+    const btns = btnBar.querySelectorAll('button');
+    const [editBtn, delBtn, ctrlBtn] = btns;
+    if (ctrlBtn) {
+      ctrlBtn.className = 'btn btn-sm btn-success';
+      ctrlBtn.textContent = '启动监控';
+      ctrlBtn.onclick = () => startMonitor(idx);
+    }
+  }
+  if (displayName) {
+    const name = card.querySelector('.account-name');
+    if (name) {
+      const exist = name.querySelector('.session-tag');
+      const tag = exist || document.createElement('span');
+      tag.className = 'session-tag';
+      tag.style.cssText = 'font-size:12px;color:#636e72;margin-left:8px;';
+      tag.textContent = displayName;
+      if (!exist) name.appendChild(tag);
+    }
+  }
+}
+
+async function submitLoginCode() {
+  const code = document.getElementById('login-code-input').value.trim();
+  if (!code) { showAlert('请输入验证码'); return; }
+  closeModal('login-code-modal');
+  try {
+    const res = await api('POST', `/api/accounts/${currentLoginIdx}/login/code`, { code });
+    if (res.status === 'ok') {
+      const m = /^登录成功: (.+) \(id=/.exec(res.message || '');
+      markCardSessionValid(currentLoginIdx, m ? m[1] : '');
+      setTimeout(loadAccounts, 300);
+    } else if (res.status === 'need_password') {
+      document.getElementById('login-password-input').value = '';
+      openModal('login-password-modal');
+    } else {
+      showAlert('登录失败: ' + (res.message || '请重试'));
+      setTimeout(loadAccounts, 300);
+    }
+  } catch (e) {
+    showAlert('登录失败: ' + e.message);
+  }
+}
+
+async function submitLoginPassword() {
+  const password = document.getElementById('login-password-input').value.trim();
+  if (!password) { showAlert('请输入密码'); return; }
+  closeModal('login-password-modal');
+  try {
+    const res = await api('POST', `/api/accounts/${currentLoginIdx}/login/password`, { password });
+    if (res.status === 'ok') {
+      const m = /^登录成功: (.+) \(id=/.exec(res.message || '');
+      markCardSessionValid(currentLoginIdx, m ? m[1] : '');
+      setTimeout(loadAccounts, 300);
+    } else {
+      showAlert('登录失败: ' + (res.message || '未知错误'));
+      setTimeout(loadAccounts, 300);
+    }
+  } catch (e) {
+    showAlert('登录失败: ' + e.message);
+  }
+}
+
+function cancelLogin() {
+  closeModal('login-code-modal');
+  closeModal('login-password-modal');
+  currentLoginIdx = -1;
+}
+
+// ============================================================
+// 监控控制
+// ============================================================
+async function startMonitor(idx) {
+  try {
+    const res = await api('POST', `/api/accounts/${idx}/start`);
+    if (res.status === 'error') {
+      showAlert('启动失败: ' + (res.message || '未知错误'));
+      return;
+    }
+    // 轮询等待真正运行
+    markCardMonitorStatus(idx, 'pending');
+    pollMonitorStatus(idx, 20);
+  } catch (e) {
+    showAlert('启动失败: ' + e.message);
+    loadAccounts();
+  }
+}
+
+async function stopMonitor(idx) {
+  try {
+    await api('POST', `/api/accounts/${idx}/stop`);
+    markCardMonitorStatus(idx, 'stopped');
+    // 再轮询确认彻底停止
+    setTimeout(() => loadAccounts(), 1000);
+  } catch (e) {
+    showAlert('停止失败: ' + e.message);
+  }
+}
+
+// 轮询监控状态，maxRetries 次后回退到 loadAccounts
+function pollMonitorStatus(idx, maxRetries) {
+  let retries = 0;
+  const timer = setInterval(async () => {
+    retries++;
+    try {
+      const res = await api('GET', `/api/accounts/${idx}/status`);
+      if (res.running) {
+        markCardMonitorStatus(idx, 'running');
+        clearInterval(timer);
+        return;
+      }
+    } catch (e) { /* ignore */ }
+    if (retries >= maxRetries) {
+      clearInterval(timer);
+      loadAccounts();
+    }
+  }, 1500);
+}
+
+// 局部更新卡片监控状态，不等 loadAccounts 完整刷新
+function markCardMonitorStatus(idx, status) {
+  const card = document.querySelectorAll('.account-card')[idx];
+  if (!card) return;
+  const badge = card.querySelector('.status-badge');
+  const btnBar = card.querySelector('.account-actions');
+  if (!btnBar) return;
+  const btns = btnBar.querySelectorAll('button');
+  const ctrlBtn = btns[btns.length - 1]; // 最后一个按钮是控制按钮
+  if (!ctrlBtn) return;
+
+  if (status === 'running') {
+    if (badge) {
+      badge.className = 'status-badge status-running';
+      badge.innerHTML = '&#x1F7E2; 监控中';
+    }
+    ctrlBtn.className = 'btn btn-sm btn-danger';
+    ctrlBtn.textContent = '停止监控';
+    ctrlBtn.onclick = () => stopMonitor(idx);
+  } else if (status === 'pending') {
+    if (badge) {
+      badge.className = 'status-badge status-stopped';
+      badge.innerHTML = '&#x1F7E1; 启动中...';
+    }
+    ctrlBtn.disabled = true;
+    ctrlBtn.textContent = '启动中...';
+  } else {
+    if (badge) {
+      badge.className = 'status-badge status-loggedin';
+      badge.innerHTML = '&#x1F535; 已登录';
+    }
+    ctrlBtn.className = 'btn btn-sm btn-success';
+    ctrlBtn.textContent = '启动监控';
+    ctrlBtn.onclick = () => startMonitor(idx);
+    ctrlBtn.disabled = false;
+  }
+}
+
+// ============================================================
+// 规则管理
+// ============================================================
+function showAddRule(accIdx) {
+  document.getElementById('rule-modal-title').textContent = '添加规则';
+  document.getElementById('rule-account-idx').value = accIdx;
+  document.getElementById('rule-edit-idx').value = '-1';
+  ['rule-remark','rule-user-ids','rule-usernames','rule-chat-ids','rule-keys-include','rule-keys-exclude',
+   'rule-webhook-url','rule-webhook-bot-token','rule-webhook-chat-id'].forEach(id => document.getElementById(id).value = '');
+  document.getElementById('rule-forward-saved').checked = true;
+  document.getElementById('rule-webhook-enabled').checked = false;
+  openModal('rule-modal');
+}
+
+async function editRule(accIdx, ruleIdx) {
+  document.getElementById('rule-modal-title').textContent = '编辑规则';
+  document.getElementById('rule-account-idx').value = accIdx;
+  document.getElementById('rule-edit-idx').value = ruleIdx;
+  try {
+    const rules = await api('GET', `/api/accounts/${accIdx}/rules`);
+    const r = rules[ruleIdx];
+    document.getElementById('rule-remark').value = r.remark || '';
+    document.getElementById('rule-user-ids').value = (r.target_user_ids || []).join(', ');
+    document.getElementById('rule-usernames').value = (r.target_usernames || []).join(', ');
+    document.getElementById('rule-chat-ids').value = (r.chat_ids || []).join(', ');
+    document.getElementById('rule-keys-include').value = (r.keywords_include || []).join(', ');
+    document.getElementById('rule-keys-exclude').value = (r.keywords_exclude || []).join(', ');
+    document.getElementById('rule-forward-saved').checked = r.forward_to_saved !== false;
+    document.getElementById('rule-webhook-enabled').checked = r.webhook_enabled || false;
+    document.getElementById('rule-webhook-url').value = r.webhook_url || '';
+    document.getElementById('rule-webhook-bot-token').value = r.webhook_bot_token || '';
+    document.getElementById('rule-webhook-chat-id').value = r.webhook_chat_id || '';
+    openModal('rule-modal');
+  } catch (e) {
+    showAlert('加载规则失败: ' + e.message);
+  }
+}
+
+function parseList(val) {
+  return val.split(',').map(s => s.trim()).filter(Boolean);
+}
+
+function parseIdList(val) {
+  return val.split(',').map(s => s.trim()).filter(Boolean).map(s => {
+    const n = Number(s);
+    return isNaN(n) ? s : n;
+  });
+}
+
+async function saveRule() {
+  const accIdx = parseInt(document.getElementById('rule-account-idx').value);
+  const ruleIdx = parseInt(document.getElementById('rule-edit-idx').value);
+  const remark = document.getElementById('rule-remark').value.trim();
+
+  if (!remark) { showAlert('请输入规则名称'); return; }
+
+  const data = {
+    remark,
+    target_user_ids: parseIdList(document.getElementById('rule-user-ids').value),
+    target_usernames: parseList(document.getElementById('rule-usernames').value),
+    chat_ids: parseIdList(document.getElementById('rule-chat-ids').value),
+    keywords_include: parseList(document.getElementById('rule-keys-include').value),
+    keywords_exclude: parseList(document.getElementById('rule-keys-exclude').value),
+    forward_to_saved: document.getElementById('rule-forward-saved').checked,
+    webhook_enabled: document.getElementById('rule-webhook-enabled').checked,
+    webhook_url: document.getElementById('rule-webhook-url').value.trim(),
+    webhook_bot_token: document.getElementById('rule-webhook-bot-token').value.trim(),
+    webhook_chat_id: document.getElementById('rule-webhook-chat-id').value.trim(),
+  };
+
+  try {
+    if (ruleIdx === -1) {
+      await api('POST', `/api/accounts/${accIdx}/rules`, data);
+    } else {
+      await api('PUT', `/api/accounts/${accIdx}/rules/${ruleIdx}`, data);
+    }
+    closeModal('rule-modal');
+    loadAccounts();
+  } catch (e) {
+    showAlert('保存规则失败: ' + e.message);
+  }
+}
+
+async function deleteRule(accIdx, ruleIdx) {
+  if (!await showConfirm('确定删除该规则？')) return;
+  try {
+    await api('DELETE', `/api/accounts/${accIdx}/rules/${ruleIdx}`);
+    loadAccounts();
+  } catch (e) {
+    showAlert('删除失败: ' + e.message);
+  }
+}
+
+// ============================================================
+// 设置
+// ============================================================
+async function loadSettings() {
+  try {
+    const s = await api('GET', '/api/settings');
+    const webhooks = s.webhooks || [];
+    document.getElementById('webhook-list').innerHTML = webhooks.map((wh, i) => renderWebhookRow(wh, i)).join('');
+    if (webhooks.length === 0) {
+      document.getElementById('webhook-list').innerHTML = '<div class="empty-state" style="padding:16px 0;">暂无 Webhook 配置</div>';
+    }
+  } catch (e) {
+    console.error('加载设置失败:', e);
+  }
+}
+
+function renderWebhookRow(wh, idx) {
+  return `
+    <div class="account-card" style="margin-bottom: 10px; padding: 16px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;">
+        <div class="form-check" style="margin-bottom:0;">
+          <input type="checkbox" id="wh-${idx}-enabled" ${wh.enabled ? 'checked' : ''}>
+          <label for="wh-${idx}-enabled">启用 Webhook #${idx + 1}</label>
+        </div>
+        <button class="btn btn-sm btn-danger" onclick="removeWebhookRow(${idx})">删除</button>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label>Bot Token <span class="hint">方式A</span></label>
+          <input class="form-control wh-input" id="wh-${idx}-bot-token" value="${escHtml(wh.telegram_bot_token || '')}" placeholder="123456:ABC-DEF...">
+        </div>
+        <div class="form-group">
+          <label>Bot Chat ID <span class="hint">方式A</span></label>
+          <input class="form-control wh-input" id="wh-${idx}-bot-chat-id" value="${escHtml(wh.telegram_chat_id || '')}" placeholder="你的 user_id">
+        </div>
+      </div>
+      <div class="form-group" style="margin-bottom:0;">
+        <label>Webhook URL <span class="hint">方式B：通用Webhook，POST JSON</span></label>
+        <input class="form-control wh-input" id="wh-${idx}-url" value="${escHtml(wh.url || '')}" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">
+      </div>
+    </div>
+  `;
+}
+
+function addWebhookRow() {
+  const container = document.getElementById('webhook-list');
+  const empty = container.querySelector('.empty-state');
+  if (empty) container.innerHTML = '';
+  const idx = container.querySelectorAll('.account-card').length;
+  container.insertAdjacentHTML('beforeend', renderWebhookRow({ enabled: false, telegram_bot_token: '', telegram_chat_id: '', url: '' }, idx));
+}
+
+function removeWebhookRow(idx) {
+  const container = document.getElementById('webhook-list');
+  const cards = container.querySelectorAll('.account-card');
+  if (cards[idx]) cards[idx].remove();
+  // 重新索引
+  Array.from(container.querySelectorAll('.account-card')).forEach((card, i) => {
+    card.querySelectorAll('.wh-input, input[type="checkbox"]').forEach(el => {
+      const oldId = el.id;
+      if (oldId) {
+        el.id = oldId.replace(/wh-\d+/, `wh-${i}`);
+        if (el.type === 'checkbox' && el.id.endsWith('-enabled')) {
+          const label = card.querySelector(`label[for="${oldId}"]`);
+          if (label) label.htmlFor = el.id;
+        }
+      }
+    });
+    const btn = card.querySelector('.btn-danger');
+    if (btn) btn.onclick = () => removeWebhookRow(i);
+  });
+}
+
+async function saveSettings() {
+  const container = document.getElementById('webhook-list');
+  const cards = container.querySelectorAll('.account-card');
+  const webhooks = Array.from(cards).map((card, i) => ({
+    enabled: document.getElementById(`wh-${i}-enabled`)?.checked || false,
+    telegram_bot_token: document.getElementById(`wh-${i}-bot-token`)?.value?.trim() || '',
+    telegram_chat_id: document.getElementById(`wh-${i}-bot-chat-id`)?.value?.trim() || '',
+    url: document.getElementById(`wh-${i}-url`)?.value?.trim() || '',
+  }));
+
+  try {
+    await api('PUT', '/api/settings', {
+      webhooks,
+    });
+    showAlert('设置已保存');
+  } catch (e) {
+    showAlert('保存失败: ' + e.message);
+  }
+}
+
+// ============================================================
+// 实时日志 (WebSocket)
+// ============================================================
+function connectLogWs() {
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${protocol}//${location.host}/ws/logs`);
+  ws.onmessage = (e) => {
+    const output = document.getElementById('log-output');
+    const cls = e.data.includes('[ERROR]') ? 'ERROR' : e.data.includes('[WARNING]') ? 'WARNING' : 'INFO';
+    const div = document.createElement('div');
+    div.className = `log-line ${cls}`;
+    div.textContent = e.data;
+    output.appendChild(div);
+    if (autoScroll) {
+      const container = document.getElementById('log-container');
+      container.scrollTop = container.scrollHeight;
+    }
+  };
+  ws.onclose = () => { setTimeout(connectLogWs, 3000); };
+  ws.onerror = () => ws.close();
+}
+
+function clearLogs() {
+  document.getElementById('log-output').innerHTML = '';
+}
+
+function toggleAutoScroll() {
+  autoScroll = !autoScroll;
+  document.getElementById('scroll-btn').textContent = autoScroll ? '自动滚动 ✓' : '自动滚动 ✗';
+}
+
+// ============================================================
+// 初始化
+// ============================================================
+loadAccounts();
+connectLogWs();
+loadHistoryAccounts();
+
+// ============================================================
+// 退出登录
+// ============================================================
+async function logout() {
+  if (!await showConfirm('确定退出登录？')) return;
+  try {
+    await api('POST', '/api/logout', {});
+    document.cookie = 'session_token=; path=/; max-age=0';
+    window.location.href = '/login';
+  } catch (e) {
+    showAlert('退出失败: ' + e.message);
+  }
+}
+
+// ============================================================
+// 历史消息
+// ============================================================
+let historyPage = 1;
+
+async function loadHistoryAccounts() {
+  try {
+    const accounts = await api('GET', '/api/accounts');
+    const sel = document.getElementById('history-account');
+    accounts.forEach(acc => {
+      const opt = document.createElement('option');
+      opt.value = acc.idx;
+      opt.textContent = `${acc.remark || '未命名'} (${acc.phone || ''})`;
+      sel.appendChild(opt);
+    });
+  } catch (e) {
+    console.error('加载历史消息账号列表失败:', e);
+  }
+}
+
+async function loadHistory(page) {
+  if (page !== undefined) historyPage = page;
+  const accountIdx = document.getElementById('history-account').value;
+  const dateFrom = document.getElementById('history-date-from').value;
+  const dateTo = document.getElementById('history-date-to').value;
+  const keyword = document.getElementById('history-keyword').value.trim();
+  const listEl = document.getElementById('history-list');
+  const paginationEl = document.getElementById('history-pagination');
+
+  listEl.innerHTML = '<div class="empty-state"><span class="icon">&#8987;</span>加载中...</div>';
+  paginationEl.style.display = 'none';
+
+  try {
+    const params = new URLSearchParams({ page: historyPage, page_size: '20' });
+    if (accountIdx !== '-1') params.set('account_idx', accountIdx);
+    if (dateFrom) params.set('date_from', dateFrom);
+    if (dateTo) params.set('date_to', dateTo);
+    if (keyword) params.set('keyword', keyword);
+
+    const res = await api('GET', `/api/history?${params.toString()}`);
+    const items = res.items || [];
+    const total = res.total || 0;
+    const totalPages = Math.ceil(total / res.page_size) || 1;
+
+    if (items.length === 0) {
+      listEl.innerHTML = '<div class="empty-state"><span class="icon">&#128196;</span>暂无匹配的历史消息</div>';
+      paginationEl.style.display = 'none';
+      return;
+    }
+
+    listEl.innerHTML = items.map(item => {
+      const mediaIcon = item.has_media
+        ? item.media_type === 'image' ? '&#128247;'
+          : item.media_type === 'video' ? '&#128250;'
+          : item.media_type === 'sticker' ? '&#128513;'
+          : item.media_type === 'document' ? '&#128196;'
+          : '&#128206;'
+        : '';
+      return `
+        <div class="rule-item" style="flex-direction: column; align-items: stretch;">
+          <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px;">
+            <div style="font-size:13px;font-weight:500;color:#2d3436;">
+              <span style="color:#636e72;font-size:12px;">${escHtml(item.ts)}</span>
+              <span style="margin-left:8px;color:#4A90D9;">${escHtml(item.account_name)}</span>
+            </div>
+            <div style="font-size:12px;color:#636e72;">
+              <span>${escHtml(item.rule_remark)}</span>
+              <span style="margin-left:8px;">${escHtml(item.chat_title)}</span>
+            </div>
+          </div>
+          <div style="margin-top:6px;font-size:13px;color:#2d3436;display:flex;align-items:center;gap:6px;">
+            <span style="color:#b2bec3;font-size:12px;">${escHtml(item.sender_name)}</span>
+            <span style="color:#b2bec3;">:</span>
+            <span style="word-break:break-all;">${escHtml(item.text || '(无文本)')}</span>
+            ${mediaIcon ? `<span style="font-size:16px;" title="${item.media_type}">${mediaIcon}</span>` : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    // 分页
+    if (totalPages > 1) {
+      paginationEl.style.display = 'flex';
+      let pagHtml = '';
+      if (historyPage > 1) {
+        pagHtml += `<button class="btn btn-sm btn-secondary" onclick="loadHistory(1)">首页</button>`;
+        pagHtml += `<button class="btn btn-sm btn-secondary" onclick="loadHistory(${historyPage - 1})">上一页</button>`;
+      }
+      pagHtml += `<span style="font-size:13px;color:#636e72;padding:0 8px;">${historyPage} / ${totalPages}</span>`;
+      if (historyPage < totalPages) {
+        pagHtml += `<button class="btn btn-sm btn-secondary" onclick="loadHistory(${historyPage + 1})">下一页</button>`;
+        pagHtml += `<button class="btn btn-sm btn-secondary" onclick="loadHistory(${totalPages})">末页</button>`;
+      }
+      paginationEl.innerHTML = pagHtml;
+    } else {
+      paginationEl.style.display = 'none';
+    }
+  } catch (e) {
+    listEl.innerHTML = `<div class="empty-state" style="color:#e74c3c;">加载失败: ${escHtml(e.message)}</div>`;
+  }
+}
+
+function resetHistoryFilter() {
+  document.getElementById('history-date-from').value = '';
+  document.getElementById('history-date-to').value = '';
+  document.getElementById('history-keyword').value = '';
+  historyPage = 1;
+  loadHistory();
+}
+</script>
+</body>
+</html>
