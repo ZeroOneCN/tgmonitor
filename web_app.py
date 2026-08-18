@@ -414,8 +414,8 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                 if file_bytes:
                     if media_type in ("image", "sticker", "gif"):
                         wecom_type = "image"
-                        # 企业微信只支持 jpg/png，贴纸 webp/gif 需转 jpg
-                        if filename.lower().endswith((".webp", ".gif", ".bmp", ".tiff")):
+                        # 企业微信只支持 jpg/png，贴纸 webp/gif 等格式需转 jpg
+                        if media_type == "sticker" or filename.lower().endswith((".webp", ".gif", ".bmp", ".tiff")):
                             try:
                                 from PIL import Image
                                 img = Image.open(BytesIO(file_bytes))
