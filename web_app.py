@@ -704,26 +704,27 @@ def media_ext(msg, media_type: str) -> str:
 
 def format_alert(event, rule_remark, chat_title, sender_name):
     msg = event.message
-    if msg.date:
-        ts = msg.date.astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        ts = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
-    text = msg.text or "(无文本/媒体消息)"
+    text = msg.text or ""
     if len(text) > 200:
         text = text[:200] + "..."
-    media = ""
     mt = detect_media_type(msg)
-    if mt:
-        media = f"\n媒体: {MEDIA_CN.get(mt, mt)}"
-    lines = [
-        f"Telegram监控告警",
-        f"规则: {rule_remark}",
-        f"时间: {ts} (UTC+8)",
-        f"群组/频道: {chat_title}",
-        f"发送者: {sender_name}",
-        f"内容: {text}{media}",
-    ]
-    return "\n".join(lines)
+    mt_cn = MEDIA_CN.get(mt, mt) if mt else ""
+    # 第一行：标题 + 规则 + 来源 + 发送者（空字段自动隐藏）
+    header_parts = [f"[Telegram 消息转发] 规则:{rule_remark}"]
+    if chat_title:
+        header_parts.append(f"来源:{chat_title}")
+    if sender_name:
+        header_parts.append(f"发送者:{sender_name}")
+    header = " | ".join(header_parts)
+    # 内容行
+    has_text = bool(msg.text and msg.text.strip())
+    if mt and not has_text:
+        content_line = f"({mt_cn})"
+    elif mt and has_text:
+        content_line = f"{text} ({mt_cn})"
+    else:
+        content_line = text if text else "(无文本)"
+    return f"{header}\n{'—' * 12}\n{content_line}"
 
 
 # ============================================================
