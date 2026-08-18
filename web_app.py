@@ -16,6 +16,7 @@ import secrets
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
+from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
@@ -413,6 +414,21 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                 if file_bytes:
                     if media_type in ("image", "sticker", "gif"):
                         wecom_type = "image"
+                        # 企业微信只支持 jpg/png，贴纸 webp/gif 需转 jpg
+                        if filename.lower().endswith((".webp", ".gif", ".bmp", ".tiff")):
+                            try:
+                                from PIL import Image
+                                img = Image.open(BytesIO(file_bytes))
+                                if img.mode in ("RGBA", "LA", "P"):
+                                    img = img.convert("RGB")
+                                buf = BytesIO()
+                                img.save(buf, format="JPEG", quality=90)
+                                file_bytes = buf.getvalue()
+                                filename = "telegram_converted.jpg"
+                            except ImportError:
+                                logger.warning(f"  Webhook [{idx}] Pillow未安装，跳过{media_type}格式转换")
+                            except Exception as e:
+                                logger.warning(f"  Webhook [{idx}] {media_type}转JPG失败: {e}")
                     elif media_type == "video":
                         wecom_type = "video"
                     else:
