@@ -852,8 +852,8 @@ class AsyncMonitor:
                                             media_type = "gif"  # 改为 GIF 类型，后续走文件上传
                                             sticker_mime = ""   # 清除，避免 webhook 再判断
                                             logger.info(f"[{account_name}] 动态贴纸(TGS)已转换为GIF ({len(file_bytes_val)} bytes)")
-                                        except ImportError:
-                                            logger.info(f"[{account_name}] 动态贴纸(TGS)未安装lottie库，跳过转换，仅推送文本")
+                                        except ImportError as e:
+                                            logger.info(f"[{account_name}] 动态贴纸(TGS)转换依赖缺失: {e}，请在服务器运行 `pip install lottie cairosvg pillow` 并重启服务")
                                             file_bytes_val = None
                                         except Exception as e:
                                             logger.warning(f"[{account_name}] 动态贴纸(TGS)转换GIF失败: {e}")

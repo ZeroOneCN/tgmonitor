@@ -8,4 +8,5 @@ customtkinter>=5.2
 fastapi>=0.110.0
 uvicorn>=0.29.0
 Pillow>=10.0.0
-lottie[cv]>=0.7.2
+lottie>=0.7.2
+cairosvg>=2.7.0
