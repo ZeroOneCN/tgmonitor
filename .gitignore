@@ -34,3 +34,6 @@ env/
 # 系统
 .DS_Store
 Thumbs.db
+
+# 媒体存档
+media/

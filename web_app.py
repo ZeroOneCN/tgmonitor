@@ -185,26 +185,34 @@ def init_history_db():
             text TEXT,
             has_media INTEGER DEFAULT 0,
             media_type TEXT DEFAULT '',
+            media_path TEXT DEFAULT '',
             rule_remark TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         )
     """)
+    # 迁移：旧库补充 media_path 字段
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(history)").fetchall()]
+        if "media_path" not in cols:
+            conn.execute("ALTER TABLE history ADD COLUMN media_path TEXT DEFAULT ''")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
 
 
-def save_history(account_name: str, account_idx: int, chat_title: str, chat_id, sender_name: str, sender_id, text: str, has_media: bool, media_type: str, rule_remark: str):
+def save_history(account_name: str, account_idx: int, chat_title: str, chat_id, sender_name: str, sender_id, text: str, has_media: bool, media_type: str, rule_remark: str, media_path: str = ""):
     try:
         conn = sqlite3.connect(str(HISTORY_DB_PATH))
         conn.execute(
-            "INSERT INTO history (ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, rule_remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO history (ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, media_path, rule_remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S"),
                 str(account_name), int(account_idx),
                 str(chat_title or ""), str(chat_id or ""),
                 str(sender_name or ""), str(sender_id or ""),
                 str(text or ""), 1 if has_media else 0,
-                str(media_type or ""), str(rule_remark or ""),
+                str(media_type or ""), str(media_path or ""), str(rule_remark or ""),
             ]
         )
         conn.commit()
@@ -403,7 +411,12 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                 filename = media_data.get("filename", "media")
                 media_type = media_data.get("media_type", "file")
                 if file_bytes:
-                    wecom_type = "image" if media_type in ("image", "sticker", "gif") else "file"
+                    if media_type in ("image", "sticker", "gif"):
+                        wecom_type = "image"
+                    elif media_type == "video":
+                        wecom_type = "video"
+                    else:
+                        wecom_type = "file"
                     mid = await asyncio.to_thread(wecom_upload_media, url, file_bytes, filename, wecom_type)
                     if mid:
                         ok2, err2 = await asyncio.to_thread(wecom_send_media, url, mid, wecom_type)
@@ -510,15 +523,79 @@ def keyword_matches(text, rule):
     return True
 
 
+MEDIA_CN = {
+    "image": "图片",
+    "video": "视频",
+    "sticker": "贴纸",
+    "gif": "GIF",
+    "document": "文件",
+    "other": "其他",
+}
+
+
+def detect_media_type(msg) -> str:
+    """判断消息媒体类型，返回内部英文类型"""
+    if msg.photo:
+        return "image"
+    if msg.sticker:
+        return "sticker"
+    if msg.gif:
+        return "gif"
+    if msg.video:
+        return "video"
+    if msg.document:
+        mime = (getattr(msg.document, "mime_type", "") or "").lower()
+        if mime.startswith("image/"):
+            return "image"
+        if mime.startswith("video/"):
+            return "video"
+        return "document"
+    if msg.media:
+        return "other"
+    return ""
+
+
+def media_ext(msg, media_type: str) -> str:
+    """根据媒体类型推断文件扩展名"""
+    if media_type == "image":
+        # 图片：优先取 mime，其次用文件扩展名
+        if msg.document:
+            mime = (getattr(msg.document, "mime_type", "") or "").lower()
+            ext_map = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+                       "image/gif": ".gif", "image/bmp": ".bmp"}
+            if mime in ext_map:
+                return ext_map[mime]
+            if mime.startswith("image/"):
+                return "." + mime.split("/")[1].replace("jpeg", "jpg")
+        return ".jpg"
+    if media_type == "video":
+        return ".mp4"
+    if media_type == "sticker":
+        return ".webp"
+    if media_type == "gif":
+        return ".gif"
+    # 文档/文件：取原始文件名扩展名
+    if msg.document:
+        for attr in getattr(msg.document, "attributes", []) or []:
+            fn = getattr(attr, "file_name", None)
+            if fn:
+                return Path(fn).suffix or ".bin"
+    return ".bin"
+
+
 def format_alert(event, rule_remark, chat_title, sender_name):
     msg = event.message
-    ts = msg.date.strftime("%Y-%m-%d %H:%M:%S") if msg.date else datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    if msg.date:
+        ts = msg.date.astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        ts = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
     text = msg.text or "(无文本/媒体消息)"
     if len(text) > 200:
         text = text[:200] + "..."
     media = ""
-    if msg.media:
-        media = f"\n媒体: {type(msg.media).__name__}"
+    mt = detect_media_type(msg)
+    if mt:
+        media = f"\n媒体: {MEDIA_CN.get(mt, mt)}"
     lines = [
         f"Telegram监控告警",
         f"规则: {rule_remark}",
@@ -627,55 +704,31 @@ class AsyncMonitor:
                             logger.info(f"[{account_name}] 已转发到 Saved Messages")
                         except Exception as e:
                             logger.error(f"[{account_name}] 转发失败: {e}")
-                    # 保存历史记录
-                    has_media = bool(msg.media)
-                    media_type = ""
-                    if has_media:
-                        if msg.photo:
-                            media_type = "image"
-                        elif msg.video:
-                            media_type = "video"
-                        elif msg.document:
-                            media_type = "document"
-                        elif msg.sticker:
-                            media_type = "sticker"
-                        elif msg.gif:
-                            media_type = "gif"
-                        else:
-                            media_type = "other"
-                    save_history(account_name, self.account_idx, chat_title, chat_id,
-                                 sender_name, sender_id, text, has_media, media_type, remark)
-                    # 下载媒体用于 Webhook 推送
+                    # 检测媒体类型
+                    media_type = detect_media_type(msg)
+                    has_media = bool(media_type)
+                    # 下载媒体（用于 Webhook 推送 + 网页展示存档）
                     media_data = None
+                    media_path = ""
                     if has_media:
                         try:
                             # 下载媒体到内存
-                            file_bytes = io.BytesIO()
-                            file_name = await self.client.download_media(msg, file=bytes)
-                            if isinstance(file_name, bytes):
-                                file_bytes_val = file_name
-                            else:
-                                file_bytes_val = file_bytes.getvalue()
-                            ext = ""
-                            if msg.photo:
-                                ext = ".jpg"
-                                media_type2 = "image"
-                            elif msg.sticker:
-                                ext = ".webp"
-                                media_type2 = "sticker"
-                            elif msg.video:
-                                ext = ".mp4"
-                                media_type2 = "video"
-                            elif msg.document:
-                                ext = Path(getattr(msg.document, 'attributes', [{}])[0].get('file_name', 'file') if isinstance(getattr(msg.document, 'attributes', [{}])[0], dict) else 'file').suffix or ".bin"
-                                media_type2 = "file"
-                            else:
-                                ext = ".bin"
-                                media_type2 = "file"
+                            file_bytes_val = await self.client.download_media(msg, file=bytes)
+                            if not isinstance(file_bytes_val, bytes):
+                                file_bytes_val = None
                             if file_bytes_val:
-                                media_data = {"bytes": file_bytes_val, "filename": f"telegram{ext}", "media_type": media_type2}
+                                ext = media_ext(msg, media_type)
+                                # 存到本地 media 目录，供网页展示
+                                media_dir = BASE_DIR / "media"
+                                media_dir.mkdir(parents=True, exist_ok=True)
+                                fname = f"{msg.id}_{int(datetime.now().timestamp())}{ext}"
+                                (media_dir / fname).write_bytes(file_bytes_val)
+                                media_path = f"/media/{fname}"
+                                media_data = {"bytes": file_bytes_val, "filename": f"telegram{ext}", "media_type": media_type}
                         except Exception as e:
                             logger.warning(f"[{account_name}] 下载媒体失败: {e}")
+                    save_history(account_name, self.account_idx, chat_title, chat_id,
+                                 sender_name, sender_id, text, has_media, media_type, remark, media_path)
                     # Webhook（规则级 + 全局，相同 URL 去重）
                     wh_list = []
                     seen_urls = set()
@@ -1277,7 +1330,7 @@ def get_history(account_idx: int = -1, page: int = 1, page_size: int = 20,
     # 分页
     offset = (page - 1) * page_size
     rows = conn.execute(
-        f"SELECT id, ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, rule_remark FROM history {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+        f"SELECT id, ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, media_path, rule_remark FROM history {where} ORDER BY id DESC LIMIT ? OFFSET ?",
         params + [page_size, offset]
     ).fetchall()
     conn.close()
@@ -1286,7 +1339,7 @@ def get_history(account_idx: int = -1, page: int = 1, page_size: int = 20,
         items.append({
             "id": r[0], "ts": r[1], "account_name": r[2], "account_idx": r[3],
             "chat_title": r[4], "chat_id": r[5], "sender_name": r[6], "sender_id": r[7],
-            "text": r[8], "has_media": bool(r[9]), "media_type": r[10], "rule_remark": r[11],
+            "text": r[8], "has_media": bool(r[9]), "media_type": r[10], "media_path": r[11] or "", "rule_remark": r[12],
         })
     return {"items": items, "total": count, "page": page, "page_size": page_size}
 
@@ -1339,6 +1392,17 @@ async def logo():
     if svg_path.exists():
         return FileResponse(svg_path, media_type="image/svg+xml")
     return HTMLResponse("")
+
+
+@app.get("/media/{filename}")
+async def get_media(filename: str):
+    """提供监控消息媒体文件（图片/视频/文件）"""
+    media_dir = BASE_DIR / "media"
+    file_path = (media_dir / filename).resolve()
+    # 防目录穿越
+    if not str(file_path).startswith(str(media_dir.resolve())) or not file_path.exists():
+        raise HTTPException(status_code=404, detail="not found")
+    return FileResponse(str(file_path))
 
 
 # ============================================================
