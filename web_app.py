@@ -311,8 +311,30 @@ def wecom_upload_media(webhook_url: str, file_bytes: bytes, filename: str, file_
         return None, f"企业微信上传媒体异常: {e}\n{traceback.format_exc()}"
 
 
+def wecom_send_image_direct(webhook_url: str, file_bytes: bytes) -> tuple:
+    """直接用 base64 发送图片到企业微信（无需上传，图片专用）"""
+    import hashlib, base64
+    try:
+        b64 = base64.b64encode(file_bytes).decode()
+        md5 = hashlib.md5(file_bytes).hexdigest()
+        payload = {"msgtype": "image", "image": {"base64": b64, "md5": md5}}
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            webhook_url, data=data,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode())
+            if result.get("errcode") == 0:
+                return True, ""
+            return False, json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        return False, str(e)
+
+
 def wecom_send_media(webhook_url: str, media_id: str, msgtype: str):
-    """发送媒体消息到企业微信"""
+    """发送媒体消息到企业微信（文件/语音/视频，需先上传获取 media_id）"""
     payload = {"msgtype": msgtype, msgtype: {"media_id": media_id}}
     try:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -491,18 +513,28 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                     if not file_bytes:
                         continue
                     file_size_mb = len(file_bytes) / (1024 * 1024)
-                    logger.info(f"  Webhook [{idx}] 准备上传 {filename} (type={wecom_type}, size={file_size_mb:.2f}MB)")
-                    mid, err_msg = await asyncio.to_thread(wecom_upload_media, url, file_bytes, filename, wecom_type)
-                    if err_msg:
-                        logger.warning(f"  Webhook [{idx}] {err_msg}")
-                    if mid:
-                        ok2, err2 = await asyncio.to_thread(wecom_send_media, url, mid, wecom_type)
+                    if wecom_type == "image":
+                        # 图片：直接用 base64 发送，无需上传
+                        logger.info(f"  Webhook [{idx}] 发送图片 {filename} (size={file_size_mb:.2f}MB)")
+                        ok2, err2 = await asyncio.to_thread(wecom_send_image_direct, url, file_bytes)
                         if ok2:
-                            logger.info(f"  Webhook [{idx}] 媒体推送成功 ({filename})")
+                            logger.info(f"  Webhook [{idx}] 图片推送成功 ({filename})")
                         else:
-                            logger.warning(f"  Webhook [{idx}] 媒体推送失败: {err2[:200]}")
+                            logger.warning(f"  Webhook [{idx}] 图片推送失败: {err2[:200]}")
                     else:
-                        logger.warning(f"  Webhook [{idx}] 媒体上传失败")
+                        # 视频/文件：上传后用 media_id 发送
+                        logger.info(f"  Webhook [{idx}] 上传 {filename} (type={wecom_type}, size={file_size_mb:.2f}MB)")
+                        mid, err_msg = await asyncio.to_thread(wecom_upload_media, url, file_bytes, filename, wecom_type)
+                        if err_msg:
+                            logger.warning(f"  Webhook [{idx}] {err_msg}")
+                        if mid:
+                            ok2, err2 = await asyncio.to_thread(wecom_send_media, url, mid, wecom_type)
+                            if ok2:
+                                logger.info(f"  Webhook [{idx}] 媒体推送成功 ({filename})")
+                            else:
+                                logger.warning(f"  Webhook [{idx}] 媒体推送失败: {err2[:200]}")
+                        else:
+                            logger.warning(f"  Webhook [{idx}] 媒体上传失败")
         else:
             payload = {"title": "Telegram监控告警", "text": alert_text, "source": "tg_monitor"}
             ok, err_msg = await asyncio.to_thread(_do_webhook_post, url, payload)
