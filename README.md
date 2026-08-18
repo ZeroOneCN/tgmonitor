@@ -8,15 +8,15 @@
 
 | 文件 | 作用 |
 |------|------|
-| [web_app.py](file:///e:/Code/Pythonproject/007Telegram群消息监控工具/web_app.py) | **Web 管理后台** — FastAPI 后端 |
-| [templates/index.html](file:///e:/Code/Pythonproject/007Telegram群消息监控工具/templates/index.html) | Web 前端页面 |
-| [templates/login.html](file:///e:/Code/Pythonproject/007Telegram群消息监控工具/templates/login.html) | 登录页面 |
-| [templates/setup.html](file:///e:/Code/Pythonproject/007Telegram群消息监控工具/templates/setup.html) | 首次初始化管理员页面 |
-| [tg_helper.py](file:///e:/Code/Pythonproject/007Telegram群消息监控工具/tg_helper.py) | 辅助工具：查 chat_id / user_id |
-| [config.json](file:///e:/Code/Pythonproject/007Telegram群消息监控工具/config.json) | 配置文件（Web 界面自动管理） |
-| [requirements.txt](file:///e:/Code/Pythonproject/007Telegram群消息监控工具/requirements.txt) | 依赖列表 |
-| [ecosystem.config.js](file:///e:/Code/Pythonproject/007Telegram群消息监控工具/ecosystem.config.js) | PM2 进程管理配置 |
-| [tg-monitor.nginx.conf](file:///e:/Code/Pythonproject/007Telegram群消息监控工具/tg-monitor.nginx.conf) | Nginx 反向代理配置示例 |
+| [web_app.py](web_app.py) | **Web 管理后台** — FastAPI 后端 |
+| [templates/index.html](templates/index.html) | Web 前端页面 |
+| [templates/login.html](templates/login.html) | 登录页面 |
+| [templates/setup.html](templates/setup.html) | 首次初始化管理员页面 |
+| [tg_helper.py](tg_helper.py) | 辅助工具：查 chat_id / user_id |
+| [config.json](config.json) | 配置文件（Web 界面自动管理） |
+| [requirements.txt](requirements.txt) | 依赖列表 |
+| [ecosystem.config.js](ecosystem.config.js) | PM2 进程管理配置 |
+| [tg-monitor.nginx.conf](tg-monitor.nginx.conf) | Nginx 反向代理配置示例 |
 | session_xxx.session | 登录会话文件（每个账号各一个，自动生成） |
 | history.db | 历史消息记录数据库（自动生成） |
 | monitor.log | 运行日志 |
