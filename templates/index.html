@@ -341,7 +341,7 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
       <input class="form-control" id="rule-user-ids" placeholder="例如：123456789, 987654321">
     </div>
     <div class="form-group">
-      <label>目标用户名 <span class="hint">留空 = 不按用户名过滤</span></label>
+      <label>目标用户名 <span class="hint">留空=不过滤；用户可改用户名，长期监控建议填ID更稳定</span></label>
       <input class="form-control" id="rule-usernames" placeholder="例如：username1, username2">
     </div>
     <div class="form-group">
@@ -365,7 +365,7 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
     <hr>
     <div class="form-check">
       <input type="checkbox" id="rule-webhook-enabled">
-      <label for="rule-webhook-enabled">Webhook 通知（覆盖全局设置）</label>
+      <label for="rule-webhook-enabled">Webhook 通知（仅本条规则使用）</label>
     </div>
     <div class="form-group">
       <label>Webhook URL <span class="hint">方式B：通用Webhook</span></label>

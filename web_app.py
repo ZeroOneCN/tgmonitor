@@ -709,6 +709,734 @@ def format_alert(event, rule_remark, chat_title, sender_name):
         text = text[:200] + "..."
     mt = detect_media_type(msg)
     mt_cn = MEDIA_CN.get(mt, mt) if mt else ""
+    # 标题单独一行，第二行规则+来源+发送者（空字段自动隐藏）
+    title = "[Telegram 消息转发]"
+    meta_parts = [f"规则:{rule_remark}"]
+    if chat_title:
+        meta_parts.append(f"来源:{chat_title}")
+    if sender_name:
+        meta_parts.append(f"发送者:{sender_name}")
+    meta_line = " | ".join(meta_parts)
+    # 内容行
+    has_text = bool(msg.text and msg.text.strip())
+    if mt and not has_text:
+        content_line = f"({mt_cn})"
+    elif mt and has_text:
+        content_line = f"{text} ({mt_cn})"
+    else:
+        content_line = text if text else "(无文本)"
+    return f"{title}\n{meta_line}\n{'—' * 12}\n{content_line}"
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Telegram 多账号监控工具 - Web 管理后台 (FastAPI)
+支持多账号同时监控，浏览器管理，实时日志推送
+"""
+
+import asyncio
+import json
+import logging
+import sqlite3
+import hashlib
+import secrets
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone, timedelta
+from io import BytesIO
+from pathlib import Path
+from typing import Optional
+
+import uvicorn
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
+from pydantic import BaseModel
+from telethon import TelegramClient, events
+from telethon.errors import SessionPasswordNeededError
+from telethon.utils import get_display_name
+
+# ============================================================
+# 常量
+# ============================================================
+BASE_DIR = Path(__file__).parent
+CONFIG_PATH = BASE_DIR / "config.json"
+HISTORY_DB_PATH = BASE_DIR / "history.db"
+SHANGHAI_TZ = timezone(timedelta(hours=8))
+SESSION_SECRET = secrets.token_hex(32)
+
+
+def default_config() -> dict:
+    return {
+        "version": 3,
+        "admin": {
+            "username": "admin",
+            "password_hash": "",
+            "password_salt": "",
+        },
+        "accounts": [],
+        "webhooks": [
+            {
+                "enabled": False,
+                "telegram_bot_token": "",
+                "telegram_chat_id": "",
+                "url": "",
+            }
+        ],
+    }
+
+
+class ConfigManager:
+    def __init__(self):
+        self.cfg = default_config()
+        self.load()
+
+    def load(self):
+        if CONFIG_PATH.exists():
+            try:
+                with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                    self.cfg = json.load(f)
+                if "accounts" not in self.cfg:
+                    old = self.cfg
+                    self.cfg = default_config()
+                    self.cfg["webhooks"] = old.get("webhooks", self.cfg["webhooks"])
+                    self.cfg["admin"] = old.get("admin", self.cfg["admin"])
+                    if old.get("api_id") and old.get("phone"):
+                        self.cfg["accounts"].append({
+                            "remark": "账号1",
+                            "phone": old["phone"],
+                            "api_id": old["api_id"],
+                            "api_hash": old.get("api_hash", ""),
+                            "proxy": old.get("proxy", {"scheme": "", "host": "", "port": 0}),
+                            "rules": [
+                                {
+                                    "remark": t.get("remark", "规则"),
+                                    "target_user_ids": t.get("target_user_ids", []),
+                                    "target_usernames": t.get("target_usernames", []),
+                                    "chat_ids": t.get("chat_ids", []),
+                                    "chat_titles": t.get("chat_titles", []),
+                                    "keywords_include": t.get("keywords_include", []),
+                                    "keywords_exclude": t.get("keywords_exclude", []),
+                                    "forward_to_saved": t.get("forward_to_saved", True),
+                                    "forward_to_chats": t.get("forward_to_chats", []),
+                                    }
+                                for t in (old.get("monitor_targets") or [])
+                            ],
+                        })
+                elif "admin" not in self.cfg:
+                    self.cfg["admin"] = default_config()["admin"]
+            except Exception:
+                self.cfg = default_config()
+
+    def save(self):
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(self.cfg, f, ensure_ascii=False, indent=2)
+
+    def get_accounts(self):
+        return self.cfg.get("accounts", [])
+
+    def add_account(self, account: dict):
+        self.cfg["accounts"].append(account)
+        self.save()
+
+    def update_account(self, idx: int, account: dict):
+        self.cfg["accounts"][idx] = account
+        self.save()
+
+    def delete_account(self, idx: int):
+        if 0 <= idx < len(self.cfg["accounts"]):
+            del self.cfg["accounts"][idx]
+            self.save()
+
+    def get_webhooks(self):
+        return self.cfg.get("webhooks", [])
+
+    def set_webhooks(self, webhooks: list):
+        self.cfg["webhooks"] = webhooks
+        self.save()
+
+    def get_admin(self):
+        return self.cfg.get("admin", {})
+
+    def set_admin_password(self, username: str, password: str):
+        salt = secrets.token_hex(16)
+        pwd_hash = hashlib.sha256((password + salt).encode()).hexdigest()
+        self.cfg["admin"] = {"username": username, "password_hash": pwd_hash, "password_salt": salt}
+        self.save()
+
+    def verify_admin(self, username: str, password: str) -> bool:
+        admin = self.get_admin()
+        if not admin.get("password_hash") or not admin.get("password_salt"):
+            return False
+        pwd_hash = hashlib.sha256((password + admin["password_salt"]).encode()).hexdigest()
+        return username == admin.get("username", "") and pwd_hash == admin["password_hash"]
+
+    def is_admin_configured(self) -> bool:
+        admin = self.get_admin()
+        return bool(admin.get("password_hash"))
+
+
+config = ConfigManager()
+
+
+# ============================================================
+# 用户认证
+# ============================================================
+def make_session_token(username: str) -> str:
+    raw = f"{username}:{secrets.token_hex(16)}:{datetime.now(SHANGHAI_TZ).timestamp()}"
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+def verify_session(request: Request) -> bool:
+    token = request.cookies.get("session_token", "")
+    if not token:
+        return False
+    stored = config.cfg.get("session_token", "")
+    return token == stored and bool(stored)
+
+
+# ============================================================
+# 历史消息数据库
+# ============================================================
+def init_history_db():
+    HISTORY_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            account_name TEXT NOT NULL,
+            account_idx INTEGER NOT NULL,
+            chat_title TEXT,
+            chat_id TEXT,
+            sender_name TEXT,
+            sender_id TEXT,
+            text TEXT,
+            has_media INTEGER DEFAULT 0,
+            media_type TEXT DEFAULT '',
+            media_path TEXT DEFAULT '',
+            rule_remark TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    # 迁移：旧库补充 media_path 字段
+    try:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(history)").fetchall()]
+        if "media_path" not in cols:
+            conn.execute("ALTER TABLE history ADD COLUMN media_path TEXT DEFAULT ''")
+    except Exception:
+        pass
+    conn.commit()
+    conn.close()
+
+
+def save_history(account_name: str, account_idx: int, chat_title: str, chat_id, sender_name: str, sender_id, text: str, has_media: bool, media_type: str, rule_remark: str, media_path: str = ""):
+    try:
+        conn = sqlite3.connect(str(HISTORY_DB_PATH))
+        conn.execute(
+            "INSERT INTO history (ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, media_path, rule_remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                str(account_name), int(account_idx),
+                str(chat_title or ""), str(chat_id or ""),
+                str(sender_name or ""), str(sender_id or ""),
+                str(text or ""), 1 if has_media else 0,
+                str(media_type or ""), str(media_path or ""), str(rule_remark or ""),
+            ]
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+# 启动时初始化
+init_history_db()
+
+
+# ============================================================
+# 图片压缩（企业微信限制图片 2MB）
+# ============================================================
+WECOM_IMAGE_MAX_SIZE = 2 * 1024 * 1024  # 2MB
+
+
+def compress_image(file_bytes: bytes, max_size: int = WECOM_IMAGE_MAX_SIZE) -> bytes:
+    """压缩图片到指定大小以内，使用 Pillow 逐步降低质量"""
+    if len(file_bytes) <= max_size:
+        return file_bytes
+    try:
+        from PIL import Image
+        img = Image.open(BytesIO(file_bytes))
+        if img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGB")
+        # 逐步降低分辨率和质量
+        for scale in [1.0, 0.8, 0.6, 0.4, 0.3]:
+            w = int(img.width * scale)
+            h = int(img.height * scale)
+            resized = img.resize((w, h), Image.LANCZOS)
+            for quality in [85, 70, 55, 40, 25]:
+                buf = BytesIO()
+                resized.save(buf, format="JPEG", quality=quality, optimize=True)
+                if buf.tell() <= max_size:
+                    logger.info(f"图片压缩: {len(file_bytes)} -> {buf.tell()} bytes (scale={scale}, q={quality})")
+                    return buf.getvalue()
+        # 最低兜底
+        resized = img.resize((int(img.width * 0.2), int(img.height * 0.2)), Image.LANCZOS)
+        buf = BytesIO()
+        resized.save(buf, format="JPEG", quality=20, optimize=True)
+        return buf.getvalue()
+    except ImportError:
+        logger.warning("Pillow 未安装，跳过图片压缩")
+        return file_bytes
+    except Exception as e:
+        logger.warning(f"图片压缩失败: {e}")
+        return file_bytes
+
+
+# ============================================================
+# 企业微信媒体上传
+# ============================================================
+def wecom_upload_media(webhook_url: str, file_bytes: bytes, filename: str, file_type: str) -> tuple:
+    """上传媒体到企业微信，返回 (media_id, error_msg)"""
+    # 根据文件扩展名确定 MIME 类型
+    _mime_map = {
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".mp4": "video/mp4",
+        ".amr": "audio/amr",
+    }
+    _ext = Path(filename).suffix.lower()
+    content_type = _mime_map.get(_ext, "application/octet-stream")
+    try:
+        # 从 webhook URL 提取 key
+        parsed = urllib.parse.urlparse(webhook_url)
+        qs = urllib.parse.parse_qs(parsed.query)
+        key = qs.get("key", [""])[0]
+        if not key:
+            return None, "无法从 webhook URL 中提取 key 参数"
+        upload_url = f"https://qyapi.weixin.qq.com/cgi-bin/webhook/upload_media?key={key}&type={file_type}"
+        boundary = "----WebKitFormBoundary" + secrets.token_hex(8)
+        body = BytesIO()
+        body.write(f"--{boundary}\r\n".encode())
+        body.write(f'Content-Disposition: form-data; name="media"; filename="{filename}"\r\n'.encode())
+        body.write(f"Content-Type: {content_type}\r\n\r\n".encode())
+        body.write(file_bytes)
+        body.write(f"\r\n--{boundary}--\r\n".encode())
+        data = body.getvalue()
+        req = urllib.request.Request(
+            upload_url, data=data,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode())
+            if result.get("errcode") == 0:
+                return result.get("media_id"), None
+            err_msg = json.dumps(result, ensure_ascii=False)
+            return None, f"企业微信上传媒体失败: {err_msg}"
+    except Exception as e:
+        import traceback
+        return None, f"企业微信上传媒体异常: {e}\n{traceback.format_exc()}"
+
+
+def wecom_send_image_direct(webhook_url: str, file_bytes: bytes) -> tuple:
+    """直接用 base64 发送图片到企业微信（无需上传，图片专用）"""
+    import hashlib, base64
+    try:
+        b64 = base64.b64encode(file_bytes).decode()
+        md5 = hashlib.md5(file_bytes).hexdigest()
+        payload = {"msgtype": "image", "image": {"base64": b64, "md5": md5}}
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            webhook_url, data=data,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            result = json.loads(resp.read().decode())
+            if result.get("errcode") == 0:
+                return True, ""
+            return False, json.dumps(result, ensure_ascii=False)
+    except Exception as e:
+        return False, str(e)
+
+
+def wecom_send_media(webhook_url: str, media_id: str, msgtype: str):
+    """发送媒体消息到企业微信（文件/语音/视频，需先上传获取 media_id）"""
+    payload = {"msgtype": msgtype, msgtype: {"media_id": media_id}}
+    try:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            webhook_url, data=data,
+            headers={"Content-Type": "application/json; charset=utf-8"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10):
+            return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+# ============================================================
+# 日志系统（支持 WebSocket 广播）
+# ============================================================
+class ShanghaiFormatter(logging.Formatter):
+    def formatTime(self, record, datefmt=None):
+        dt = datetime.fromtimestamp(record.created, tz=SHANGHAI_TZ)
+        if datefmt:
+            return dt.strftime(datefmt)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+class LogBroadcaster:
+    def __init__(self):
+        self.connections: list[WebSocket] = []
+        self.logger = logging.getLogger("tg_monitor_web")
+        self.logger.setLevel(logging.INFO)
+        handler = WebLogHandler(self)
+        handler.setFormatter(ShanghaiFormatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
+        self.logger.addHandler(handler)
+        # 也输出到控制台
+        console = logging.StreamHandler()
+        console.setFormatter(ShanghaiFormatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
+        self.logger.addHandler(console)
+
+    async def add_connection(self, ws: WebSocket):
+        await ws.accept()
+        self.connections.append(ws)
+
+    def remove_connection(self, ws: WebSocket):
+        if ws in self.connections:
+            self.connections.remove(ws)
+
+    async def broadcast(self, message: str):
+        dead = []
+        for ws in self.connections:
+            try:
+                await ws.send_text(message)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.remove_connection(ws)
+
+
+class WebLogHandler(logging.Handler):
+    def __init__(self, broadcaster: LogBroadcaster):
+        super().__init__()
+        self.broadcaster = broadcaster
+
+    def emit(self, record):
+        msg = self.format(record)
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                asyncio.ensure_future(self.broadcaster.broadcast(msg))
+        except RuntimeError:
+            pass
+
+
+broadcaster = LogBroadcaster()
+logger = broadcaster.logger
+
+# 屏蔽 Telethon 内部告警的 print/日志输出，避免"Telegram is having internal issues"污染
+import warnings
+warnings.filterwarnings("ignore")
+for _n in ["telethon", "telethon.client", "telethon.network"]:
+    _tl = logging.getLogger(_n)
+    _tl.setLevel(logging.ERROR)
+    _tl.propagate = False
+# 屏蔽 telethon 内部的 sys.stdout print
+import builtins as _builtins
+_orig_print = _builtins.print
+def _silent_print(*args, **kwargs):
+    msg = " ".join(str(a) for a in args)
+    if "Telegram is having internal issues" in msg or "AuthRestartError" in msg:
+        return
+    _orig_print(*args, **kwargs)
+_builtins.print = _silent_print
+
+# ============================================================
+# Session 锁（防止多个 check_session 或登录并发访问 SQLite）
+# ============================================================
+_session_locks: dict[str, asyncio.Lock] = {}
+
+
+# ============================================================
+# Webhook 推送
+# ============================================================
+def _do_webhook_post(url: str, payload: dict):
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json; charset=utf-8"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
+async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optional[dict] = None):
+    for idx, wh in enumerate(webhooks):
+        url = wh.get("url", "").strip()
+        if not url or not wh.get("enabled", True):
+            continue
+        bot_token = wh.get("telegram_bot_token", "").strip()
+        bot_chat_id = wh.get("telegram_chat_id", "").strip()
+        if bot_token and bot_chat_id:
+            text = alert_text[:4096]
+            params = urllib.parse.urlencode({"chat_id": bot_chat_id, "text": text, "parse_mode": "Markdown"})
+            bot_url = f"https://api.telegram.org/bot{bot_token}/sendMessage?{params}"
+            ok, err_msg = await asyncio.to_thread(_do_webhook_post, bot_url, {})
+            if ok:
+                logger.info(f"  Webhook [{idx}] (Bot) 推送成功")
+            else:
+                logger.warning(f"  Webhook [{idx}] (Bot) 推送失败: {err_msg[:200]}")
+            continue
+        # 企业微信机器人：支持媒体推送
+        if "qyapi.weixin.qq.com" in url:
+            # 先发送文本消息
+            payload = {"msgtype": "markdown", "markdown": {"content": alert_text}}
+            ok, err_msg = await asyncio.to_thread(_do_webhook_post, url, payload)
+            if ok:
+                logger.info(f"  Webhook [{idx}] 文本推送成功")
+            else:
+                logger.warning(f"  Webhook [{idx}] 文本推送失败: {err_msg[:200]}")
+            # 如果有媒体，再推送媒体消息
+            if media_data:
+                file_bytes = media_data.get("bytes")
+                filename = media_data.get("filename", "media")
+                media_type = media_data.get("media_type", "file")
+                if file_bytes:
+                    if media_type == "gif":
+                        # GIF 动图：企业微信图片不支持 GIF，改为上传为文件保留动画
+                        wecom_type = "file"
+                        # 不转换，保持原始 GIF 动画
+                    elif media_type in ("image", "sticker"):
+                        wecom_type = "image"
+                        # 企业微信只支持 jpg/png，所有图片统一用 Pillow 转为标准 JPEG
+                        converted = False
+                        try:
+                            from PIL import Image
+                            img = Image.open(BytesIO(file_bytes))
+                            if img.mode in ("RGBA", "LA", "P"):
+                                img = img.convert("RGB")
+                            buf = BytesIO()
+                            img.save(buf, format="JPEG", quality=90)
+                            file_bytes = buf.getvalue()
+                            filename = "telegram_converted.jpg"
+                            converted = True
+                        except ImportError:
+                            logger.warning(f"  Webhook [{idx}] Pillow未安装，跳过图片格式转换")
+                        except Exception as e:
+                            sticker_mime = media_data.get("sticker_mime", "")
+                            if sticker_mime == "application/x-tgsticker":
+                                logger.info(f"  Webhook [{idx}] 动态贴纸(TGS)不支持图片转换，仅推送文本")
+                            elif sticker_mime == "image/webp":
+                                logger.warning(f"  Webhook [{idx}] 静态贴纸转换失败: {e}")
+                            else:
+                                logger.warning(f"  Webhook [{idx}] {media_type}无法转换: {e}")
+                        if not converted:
+                            file_bytes = None  # 跳过后续上传
+                        # 压缩到 2MB 以内（企业微信限制）
+                        if file_bytes and len(file_bytes) > WECOM_IMAGE_MAX_SIZE:
+                            file_bytes = compress_image(file_bytes)
+                            filename = "telegram_compressed.jpg"
+                    elif media_type == "video":
+                        wecom_type = "video"
+                    else:
+                        wecom_type = "file"
+                    if not file_bytes:
+                        continue
+                    file_size_mb = len(file_bytes) / (1024 * 1024)
+                    if wecom_type == "image":
+                        # 图片：直接用 base64 发送，无需上传
+                        logger.info(f"  Webhook [{idx}] 发送图片 {filename} (size={file_size_mb:.2f}MB)")
+                        ok2, err2 = await asyncio.to_thread(wecom_send_image_direct, url, file_bytes)
+                        if ok2:
+                            logger.info(f"  Webhook [{idx}] 图片推送成功 ({filename})")
+                        else:
+                            logger.warning(f"  Webhook [{idx}] 图片推送失败: {err2[:200]}")
+                    else:
+                        # 视频/文件：上传后用 media_id 发送
+                        logger.info(f"  Webhook [{idx}] 上传 {filename} (type={wecom_type}, size={file_size_mb:.2f}MB)")
+                        mid, err_msg = await asyncio.to_thread(wecom_upload_media, url, file_bytes, filename, wecom_type)
+                        if err_msg:
+                            logger.warning(f"  Webhook [{idx}] {err_msg}")
+                        if mid:
+                            ok2, err2 = await asyncio.to_thread(wecom_send_media, url, mid, wecom_type)
+                            if ok2:
+                                logger.info(f"  Webhook [{idx}] 媒体推送成功 ({filename})")
+                            else:
+                                logger.warning(f"  Webhook [{idx}] 媒体推送失败: {err2[:200]}")
+                        else:
+                            logger.warning(f"  Webhook [{idx}] 媒体上传失败")
+        else:
+            payload = {"title": "Telegram监控告警", "text": alert_text, "source": "tg_monitor"}
+            ok, err_msg = await asyncio.to_thread(_do_webhook_post, url, payload)
+            if ok:
+                logger.info(f"  Webhook [{idx}] 推送成功")
+            else:
+                logger.warning(f"  Webhook [{idx}] 推送失败: {err_msg[:200]}")
+
+
+# ============================================================
+# 规则匹配（复用 gui_app.py 的逻辑）
+# ============================================================
+def user_matches(user_id, username, rule):
+    ids = rule.get("target_user_ids") or []
+    names = rule.get("target_usernames") or []
+    if not ids and not names:
+        return True
+    # 统一转为 int 比较，避免类型不一致
+    if user_id is not None:
+        try:
+            user_id_int = int(user_id)
+        except (ValueError, TypeError):
+            user_id_int = user_id
+        ids_int = []
+        for v in ids:
+            try:
+                ids_int.append(int(v))
+            except (ValueError, TypeError):
+                ids_int.append(v)
+        if user_id_int in ids_int:
+            return True
+    if username and names:
+        uname = (username or "").lower().lstrip("@")
+        return any(uname == n.lower().lstrip("@") for n in names)
+    return False
+
+
+def _bare_id(val):
+    """提取裸 ID（去掉 -100 前缀），支持 int 和 str 输入"""
+    try:
+        n = int(val)
+        s = str(n)
+        if s.startswith("-100") and len(s) > 4:
+            return int(s[4:])
+        return n
+    except (ValueError, TypeError):
+        return val
+
+
+def _full_id(val):
+    """生成带 -100 前缀的完整 ID（仅对正数生效）"""
+    try:
+        n = int(val)
+        if n > 0:
+            return int(f"-100{n}")
+        return n
+    except (ValueError, TypeError):
+        return val
+
+
+def chat_matches(chat_id, chat_title, rule):
+    ids = rule.get("chat_ids") or []
+    titles = rule.get("chat_titles") or []
+    if not ids and not titles:
+        return True
+    if chat_id is not None:
+        try:
+            chat_id_bare = _bare_id(chat_id)
+            chat_id_full = _full_id(chat_id)
+        except (ValueError, TypeError):
+            chat_id_bare = chat_id
+            chat_id_full = chat_id
+        ids_bare = []
+        for v in ids:
+            try:
+                ids_bare.append(_bare_id(v))
+            except (ValueError, TypeError):
+                ids_bare.append(v)
+        # 同时检查裸 ID 和完整 ID，覆盖 Telethon 返回不一致的情况
+        if chat_id_bare in ids_bare or chat_id_full in ids_bare:
+            return True
+    # 回退到 chat_title 匹配
+    if chat_title and titles:
+        return any(t.strip().lower() in chat_title.lower() for t in titles)
+    return False
+
+
+def keyword_matches(text, rule):
+    inc = rule.get("keywords_include") or []
+    exc = rule.get("keywords_exclude") or []
+    if inc and not any(k in text for k in inc):
+        return False
+    if exc and any(k in text for k in exc):
+        return False
+    return True
+
+
+MEDIA_CN = {
+    "image": "图片",
+    "video": "视频",
+    "sticker": "贴纸",
+    "gif": "GIF",
+    "document": "文件",
+    "other": "其他",
+}
+
+
+def detect_media_type(msg) -> str:
+    """判断消息媒体类型，返回内部英文类型"""
+    if msg.photo:
+        return "image"
+    if msg.sticker:
+        return "sticker"
+    if msg.gif:
+        return "gif"
+    if msg.video:
+        return "video"
+    if msg.document:
+        mime = (getattr(msg.document, "mime_type", "") or "").lower()
+        if mime.startswith("image/"):
+            return "image"
+        if mime.startswith("video/"):
+            return "video"
+        return "document"
+    if msg.media:
+        return "other"
+    return ""
+
+
+def media_ext(msg, media_type: str) -> str:
+    """根据媒体类型推断文件扩展名"""
+    if media_type == "image":
+        # 图片：优先取 mime，其次用文件扩展名
+        if msg.document:
+            mime = (getattr(msg.document, "mime_type", "") or "").lower()
+            ext_map = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp",
+                       "image/gif": ".gif", "image/bmp": ".bmp"}
+            if mime in ext_map:
+                return ext_map[mime]
+            if mime.startswith("image/"):
+                return "." + mime.split("/")[1].replace("jpeg", "jpg")
+        return ".jpg"
+    if media_type == "video":
+        return ".mp4"
+    if media_type == "sticker":
+        return ".webp"
+    if media_type == "gif":
+        return ".gif"
+    # 文档/文件：取原始文件名扩展名
+    if msg.document:
+        for attr in getattr(msg.document, "attributes", []) or []:
+            fn = getattr(attr, "file_name", None)
+            if fn:
+                return Path(fn).suffix or ".bin"
+    return ".bin"
+
+
+def format_alert(event, rule_remark, chat_title, sender_name):
+    msg = event.message
+    text = msg.text or ""
+    if len(text) > 200:
+        text = text[:200] + "..."
+    mt = detect_media_type(msg)
+    mt_cn = MEDIA_CN.get(mt, mt) if mt else ""
     # 第一行：标题 + 规则 + 来源 + 发送者（空字段自动隐藏）
     header_parts = [f"[Telegram 消息转发] 规则:{rule_remark}"]
     if chat_title:
