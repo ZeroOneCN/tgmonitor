@@ -838,9 +838,8 @@ class AsyncMonitor:
                             logger.warning(f"[{account_name}] 下载媒体失败: {e}")
                     save_history(account_name, self.account_idx, chat_title, chat_id,
                                  sender_name, sender_id, text, has_media, media_type, remark, media_path)
-                    # Webhook（规则级 + 全局，相同 URL 去重）
+                    # Webhook：规则级优先，有规则级则跳过全局
                     wh_list = []
-                    seen_urls = set()
                     if rule.get("webhook_enabled"):
                         rw = {
                             "enabled": True,
@@ -849,14 +848,13 @@ class AsyncMonitor:
                             "telegram_chat_id": rule.get("webhook_chat_id", ""),
                         }
                         u = rw["url"].strip()
-                        if u and u not in seen_urls:
-                            seen_urls.add(u)
+                        if u:
                             wh_list.append(rw)
-                    for gw in (webhooks or []):
-                        u = gw.get("url", "").strip()
-                        if u and u not in seen_urls:
-                            seen_urls.add(u)
-                            wh_list.append(gw)
+                    else:
+                        for gw in (webhooks or []):
+                            u = gw.get("url", "").strip()
+                            if u:
+                                wh_list.append(gw)
                     if wh_list:
                         asyncio.ensure_future(send_webhook_alerts(alert, wh_list, media_data))
             except Exception as e:
