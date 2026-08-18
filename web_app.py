@@ -1145,21 +1145,6 @@ for _n in ["telethon", "telethon.client", "telethon.network"]:
     _tl = logging.getLogger(_n)
     _tl.setLevel(logging.ERROR)
     _tl.propagate = False
-# 屏蔽 telethon 内部的 sys.stdout print
-import builtins as _builtins
-_orig_print = _builtins.print
-def _silent_print(*args, **kwargs):
-    msg = " ".join(str(a) for a in args)
-    if "Telegram is having internal issues" in msg or "AuthRestartError" in msg:
-        return
-    _orig_print(*args, **kwargs)
-_builtins.print = _silent_print
-
-# ============================================================
-# Session 锁（防止多个 check_session 或登录并发访问 SQLite）
-# ============================================================
-_session_locks: dict[str, asyncio.Lock] = {}
-
 
 # ============================================================
 # Webhook 推送
