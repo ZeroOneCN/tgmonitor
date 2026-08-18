@@ -455,6 +455,7 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                         wecom_type = "image"
                         # 企业微信只支持 jpg/png，贴纸 webp/gif 等格式需转 jpg
                         if media_type == "sticker" or filename.lower().endswith((".webp", ".gif", ".bmp", ".tiff")):
+                            converted = False
                             try:
                                 from PIL import Image
                                 img = Image.open(BytesIO(file_bytes))
@@ -464,18 +465,23 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                                 img.save(buf, format="JPEG", quality=90)
                                 file_bytes = buf.getvalue()
                                 filename = "telegram_converted.jpg"
+                                converted = True
                             except ImportError:
                                 logger.warning(f"  Webhook [{idx}] Pillow未安装，跳过{media_type}格式转换")
                             except Exception as e:
-                                logger.warning(f"  Webhook [{idx}] {media_type}转JPG失败: {e}")
+                                logger.warning(f"  Webhook [{idx}] {media_type}无法转换(动态贴纸或格式不支持): {e}")
+                            if not converted:
+                                file_bytes = None  # 跳过后续上传
                         # 压缩到 2MB 以内（企业微信限制）
-                        if len(file_bytes) > WECOM_IMAGE_MAX_SIZE:
+                        if file_bytes and len(file_bytes) > WECOM_IMAGE_MAX_SIZE:
                             file_bytes = compress_image(file_bytes)
                             filename = "telegram_compressed.jpg"
                     elif media_type == "video":
                         wecom_type = "video"
                     else:
                         wecom_type = "file"
+                    if not file_bytes:
+                        continue
                     mid = await asyncio.to_thread(wecom_upload_media, url, file_bytes, filename, wecom_type)
                     if mid:
                         ok2, err2 = await asyncio.to_thread(wecom_send_media, url, mid, wecom_type)
