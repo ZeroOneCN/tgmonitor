@@ -831,13 +831,34 @@ class AsyncMonitor:
                     media_path = ""
                     if has_media:
                         try:
-                            # 检查贴纸类型：动态贴纸(TGS)无法转换图片，直接跳过
+                            # 检查贴纸类型：动态贴纸(TGS)尝试转换为GIF
                             sticker_mime = ""
                             if msg.sticker:
                                 sticker_mime = (getattr(msg.sticker, "mime_type", "") or "").lower()
                                 if sticker_mime == "application/x-tgsticker":
-                                    logger.info(f"[{account_name}] 动态贴纸(TGS)不支持图片转换，仅推送文本")
-                                    file_bytes_val = None
+                                    # 下载后尝试转换为 GIF
+                                    file_bytes_val = await self.client.download_media(msg, file=bytes)
+                                    if isinstance(file_bytes_val, bytes):
+                                        try:
+                                            import json
+                                            from lottie import Document
+                                            from lottie.exporters import export_gif
+                                            tgs_data = json.loads(file_bytes_val.decode("utf-8"))
+                                            doc = Document.from_dict(tgs_data)
+                                            gif_buf = BytesIO()
+                                            export_gif(doc, gif_buf, fps=10)
+                                            file_bytes_val = gif_buf.getvalue()
+                                            media_type = "gif"  # 改为 GIF 类型，后续走文件上传
+                                            sticker_mime = ""   # 清除，避免 webhook 再判断
+                                            logger.info(f"[{account_name}] 动态贴纸(TGS)已转换为GIF ({len(file_bytes_val)} bytes)")
+                                        except ImportError:
+                                            logger.info(f"[{account_name}] 动态贴纸(TGS)未安装lottie库，跳过转换，仅推送文本")
+                                            file_bytes_val = None
+                                        except Exception as e:
+                                            logger.warning(f"[{account_name}] 动态贴纸(TGS)转换GIF失败: {e}")
+                                            file_bytes_val = None
+                                    else:
+                                        file_bytes_val = None
                                 elif sticker_mime == "video/webm":
                                     media_type = "video"  # 视频贴纸当作视频处理
                                     file_bytes_val = await self.client.download_media(msg, file=bytes)
