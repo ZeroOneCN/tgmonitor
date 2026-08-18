@@ -24,6 +24,7 @@ from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
 from pydantic import BaseModel
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
+from telethon.utils import get_display_name
 BASE_DIR = Path(__file__).parent
 CONFIG_PATH = BASE_DIR / "config.json"
 HISTORY_DB_PATH = BASE_DIR / "history.db"
