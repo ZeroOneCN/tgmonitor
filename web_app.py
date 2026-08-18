@@ -853,7 +853,7 @@ class AsyncMonitor:
                                                     except Exception:
                                                         pass
                                             gif_buf = BytesIO()
-                                            export_gif(animation, gif_buf, fps=10)
+                                            export_gif(animation, gif_buf, skip_frames=6)
                                             file_bytes_val = gif_buf.getvalue()
                                             media_type = "gif"
                                             sticker_mime = ""
