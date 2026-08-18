@@ -499,7 +499,13 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                         except ImportError:
                             logger.warning(f"  Webhook [{idx}] Pillow未安装，跳过图片格式转换")
                         except Exception as e:
-                            logger.warning(f"  Webhook [{idx}] {media_type}无法转换(动态贴纸或格式不支持): {e}")
+                            sticker_mime = media_data.get("sticker_mime", "")
+                            if sticker_mime == "application/x-tgsticker":
+                                logger.info(f"  Webhook [{idx}] 动态贴纸(TGS)不支持图片转换，仅推送文本")
+                            elif sticker_mime == "image/webp":
+                                logger.warning(f"  Webhook [{idx}] 静态贴纸转换失败: {e}")
+                            else:
+                                logger.warning(f"  Webhook [{idx}] {media_type}无法转换: {e}")
                         if not converted:
                             file_bytes = None  # 跳过后续上传
                         # 压缩到 2MB 以内（企业微信限制）
@@ -821,8 +827,20 @@ class AsyncMonitor:
                     media_path = ""
                     if has_media:
                         try:
-                            # 下载媒体到内存
-                            file_bytes_val = await self.client.download_media(msg, file=bytes)
+                            # 检查贴纸类型：动态贴纸(TGS)无法转换图片，直接跳过
+                            sticker_mime = ""
+                            if msg.sticker:
+                                sticker_mime = (getattr(msg.sticker, "mime_type", "") or "").lower()
+                                if sticker_mime == "application/x-tgsticker":
+                                    logger.info(f"[{account_name}] 动态贴纸(TGS)不支持图片转换，仅推送文本")
+                                    file_bytes_val = None
+                                elif sticker_mime == "video/webm":
+                                    media_type = "video"  # 视频贴纸当作视频处理
+                                    file_bytes_val = await self.client.download_media(msg, file=bytes)
+                                else:
+                                    file_bytes_val = await self.client.download_media(msg, file=bytes)
+                            else:
+                                file_bytes_val = await self.client.download_media(msg, file=bytes)
                             if not isinstance(file_bytes_val, bytes):
                                 file_bytes_val = None
                             if file_bytes_val:
@@ -833,7 +851,7 @@ class AsyncMonitor:
                                 fname = f"{msg.id}_{int(datetime.now().timestamp())}{ext}"
                                 (media_dir / fname).write_bytes(file_bytes_val)
                                 media_path = f"/media/{fname}"
-                                media_data = {"bytes": file_bytes_val, "filename": f"telegram{ext}", "media_type": media_type}
+                                media_data = {"bytes": file_bytes_val, "filename": f"telegram{ext}", "media_type": media_type, "sticker_mime": sticker_mime}
                         except Exception as e:
                             logger.warning(f"[{account_name}] 下载媒体失败: {e}")
                     save_history(account_name, self.account_idx, chat_title, chat_id,
