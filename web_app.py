@@ -6,8 +6,6 @@ Telegram 多账号监控工具 - Web 管理后台 (FastAPI)
 """
 
 import asyncio
-import io
-from io import BytesIO
 import json
 import logging
 import sqlite3
@@ -227,6 +225,45 @@ init_history_db()
 
 
 # ============================================================
+# 图片压缩（企业微信限制图片 2MB）
+# ============================================================
+WECOM_IMAGE_MAX_SIZE = 2 * 1024 * 1024  # 2MB
+
+
+def compress_image(file_bytes: bytes, max_size: int = WECOM_IMAGE_MAX_SIZE) -> bytes:
+    """压缩图片到指定大小以内，使用 Pillow 逐步降低质量"""
+    if len(file_bytes) <= max_size:
+        return file_bytes
+    try:
+        from PIL import Image
+        img = Image.open(BytesIO(file_bytes))
+        if img.mode in ("RGBA", "LA", "P"):
+            img = img.convert("RGB")
+        # 逐步降低分辨率和质量
+        for scale in [1.0, 0.8, 0.6, 0.4, 0.3]:
+            w = int(img.width * scale)
+            h = int(img.height * scale)
+            resized = img.resize((w, h), Image.LANCZOS)
+            for quality in [85, 70, 55, 40, 25]:
+                buf = BytesIO()
+                resized.save(buf, format="JPEG", quality=quality, optimize=True)
+                if buf.tell() <= max_size:
+                    logger.info(f"图片压缩: {len(file_bytes)} -> {buf.tell()} bytes (scale={scale}, q={quality})")
+                    return buf.getvalue()
+        # 最低兜底
+        resized = img.resize((int(img.width * 0.2), int(img.height * 0.2)), Image.LANCZOS)
+        buf = BytesIO()
+        resized.save(buf, format="JPEG", quality=20, optimize=True)
+        return buf.getvalue()
+    except ImportError:
+        logger.warning("Pillow 未安装，跳过图片压缩")
+        return file_bytes
+    except Exception as e:
+        logger.warning(f"图片压缩失败: {e}")
+        return file_bytes
+
+
+# ============================================================
 # 企业微信媒体上传
 # ============================================================
 def wecom_upload_media(webhook_url: str, file_bytes: bytes, filename: str, file_type: str) -> Optional[str]:
@@ -256,10 +293,12 @@ def wecom_upload_media(webhook_url: str, file_bytes: bytes, filename: str, file_
             result = json.loads(resp.read().decode())
             if result.get("errcode") == 0:
                 return result.get("media_id")
-            logger.warning(f"企业微信上传媒体失败: {result}")
+            logger.warning(f"企业微信上传媒体失败: {json.dumps(result, ensure_ascii=False)}")
             return None
     except Exception as e:
         logger.warning(f"企业微信上传媒体异常: {e}")
+        import traceback
+        logger.warning(traceback.format_exc())
         return None
 
 
@@ -429,6 +468,10 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                                 logger.warning(f"  Webhook [{idx}] Pillow未安装，跳过{media_type}格式转换")
                             except Exception as e:
                                 logger.warning(f"  Webhook [{idx}] {media_type}转JPG失败: {e}")
+                        # 压缩到 2MB 以内（企业微信限制）
+                        if len(file_bytes) > WECOM_IMAGE_MAX_SIZE:
+                            file_bytes = compress_image(file_bytes)
+                            filename = "telegram_compressed.jpg"
                     elif media_type == "video":
                         wecom_type = "video"
                     else:
