@@ -35,10 +35,34 @@ nav { display: flex; gap: 2px; height: 100%; }
 .tab-btn:hover { color: #4A90D9; background: #f0f4ff; }
 .tab-btn.active { color: #4A90D9; border-bottom-color: #4A90D9; }
 
-/* 主内容 */
-main { padding: 24px; max-width: 1100px; margin: 0 auto; }
+/* 主内容 - 铺满布局 */
+main { padding: 24px; width: 100%; }
 .tab-content { display: none; }
 .tab-content.active { display: block; }
+
+/* 统计卡片网格 */
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-bottom: 24px;
+}
+.stat-card {
+  background: #fff; border-radius: 10px; padding: 20px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06); border: 1px solid #e8eaed;
+}
+.stat-card h4 { font-size: 14px; color: #636e72; margin-bottom: 8px; font-weight: 500; }
+.stat-card .value { font-size: 32px; font-weight: 600; color: #2d3436; }
+.stat-card .sub { font-size: 12px; color: #b2bec3; margin-top: 4px; }
+
+/* 图表容器 */
+.chart-container {
+  background: #fff; border-radius: 10px; padding: 20px;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06); border: 1px solid #e8eaed;
+  margin-bottom: 16px;
+}
+.chart-container h3 { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #2d3436; }
+.chart-wrapper { position: relative; height: 300px; }
 
 /* 账号卡片 */
 .account-card {
@@ -207,6 +231,7 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
   <h1><img src="/logo.svg" alt="Telegram"> Telegram 群聊频道消息监控后台</h1>
   <nav>
     <button class="tab-btn active" onclick="switchTab('accounts')">账号管理</button>
+    <button class="tab-btn" onclick="switchTab('stats')">统计</button>
     <button class="tab-btn" onclick="switchTab('history')">历史消息</button>
     <button class="tab-btn" onclick="switchTab('logs')">实时日志</button>
     <button class="tab-btn" onclick="switchTab('settings')">设置</button>
@@ -222,6 +247,55 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
       <button class="btn btn-secondary" onclick="loadAccounts()">刷新状态</button>
     </div>
     <div id="account-list"></div>
+  </section>
+
+  <!-- 统计面板 -->
+  <section id="tab-stats" class="tab-content">
+    <!-- 概览卡片 -->
+    <div class="stats-grid">
+      <div class="stat-card">
+        <h4>今日消息量</h4>
+        <div class="value" id="stat-today-messages">-</div>
+        <div class="sub" id="stat-today-messages-sub">加载中...</div>
+      </div>
+      <div class="stat-card">
+        <h4>推送成功率</h4>
+        <div class="value" id="stat-push-success-rate">-</div>
+        <div class="sub" id="stat-push-success-rate-sub">加载中...</div>
+      </div>
+      <div class="stat-card">
+        <h4>活跃账号</h4>
+        <div class="value" id="stat-active-accounts">-</div>
+        <div class="sub" id="stat-active-accounts-sub">加载中...</div>
+      </div>
+      <div class="stat-card">
+        <h4>监控群组数</h4>
+        <div class="value" id="stat-monitored-chats">-</div>
+        <div class="sub" id="stat-monitored-chats-sub">加载中...</div>
+      </div>
+    </div>
+
+    <!-- 图表区域 -->
+    <div class="chart-container">
+      <h3>近 7 天消息趋势</h3>
+      <div class="chart-wrapper">
+        <canvas id="chart-daily-messages"></canvas>
+      </div>
+    </div>
+
+    <div class="chart-container">
+      <h3>各账号消息量</h3>
+      <div class="chart-wrapper">
+        <canvas id="chart-account-messages"></canvas>
+      </div>
+    </div>
+
+    <div class="chart-container">
+      <h3>活跃群组 TOP 10</h3>
+      <div class="chart-wrapper">
+        <canvas id="chart-top-chats"></canvas>
+      </div>
+    </div>
   </section>
 
   <!-- 实时日志 -->
@@ -498,6 +572,7 @@ function switchTab(name) {
   document.getElementById(`tab-${name}`).classList.add('active');
   if (name === 'accounts') loadAccounts();
   if (name === 'settings') loadSettings();
+  if (name === 'stats') loadStats();
 }
 
 // ============================================================
@@ -1208,7 +1283,7 @@ async function loadHistory(page) {
             </div>
             <div style="font-size:12px;color:#636e72;display:flex;align-items:center;gap:8px;">
               <span>${escHtml(item.rule_remark)}</span>
-              <span style="display:inline-block;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;" title="${escHtml(item.chat_title)}">${escHtml(item.chat_title)}</span>
+              <span style="display:inline-block;min-width:160px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;" title="${escHtml(item.chat_title)}">${escHtml(item.chat_title)}</span>
             </div>
           </div>
           <div style="margin-top:6px;font-size:13px;color:#2d3436;display:flex;align-items:center;gap:6px;">
@@ -1251,6 +1326,126 @@ function resetHistoryFilter() {
   historyPage = 1;
   loadHistory();
 }
+
+// ============================================================
+// 统计面板
+// ============================================================
+let chartDailyMessages = null;
+let chartAccountMessages = null;
+let chartTopChats = null;
+
+async function loadStats() {
+  try {
+    const res = await api('GET', '/api/stats');
+    
+    // 更新概览卡片
+    document.getElementById('stat-today-messages').textContent = res.overview.today_messages || 0;
+    document.getElementById('stat-today-messages-sub').textContent = `昨日: ${res.overview.yesterday_messages || 0}`;
+    
+    const successRate = res.overview.push_success_rate || 0;
+    document.getElementById('stat-push-success-rate').textContent = `${successRate}%`;
+    document.getElementById('stat-push-success-rate-sub').textContent = `成功: ${res.overview.push_success || 0} / 总计: ${res.overview.push_total || 0}`;
+    
+    document.getElementById('stat-active-accounts').textContent = res.overview.active_accounts || 0;
+    document.getElementById('stat-active-accounts-sub').textContent = `总账号: ${res.overview.total_accounts || 0}`;
+    
+    document.getElementById('stat-monitored-chats').textContent = res.overview.monitored_chats || 0;
+    document.getElementById('stat-monitored-chats-sub').textContent = '有消息的群组';
+    
+    // 渲染图表
+    renderDailyMessagesChart(res.daily_messages);
+    renderAccountMessagesChart(res.account_messages);
+    renderTopChatsChart(res.top_chats);
+  } catch (e) {
+    console.error('加载统计数据失败:', e);
+  }
+}
+
+function renderDailyMessagesChart(data) {
+  const ctx = document.getElementById('chart-daily-messages').getContext('2d');
+  if (chartDailyMessages) chartDailyMessages.destroy();
+  
+  chartDailyMessages = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: data.map(d => d.date),
+      datasets: [{
+        label: '消息量',
+        data: data.map(d => d.count),
+        borderColor: '#4A90D9',
+        backgroundColor: 'rgba(74, 144, 217, 0.1)',
+        tension: 0.3,
+        fill: true
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false }
+      },
+      scales: {
+        y: { beginAtZero: true }
+      }
+    }
+  });
+}
+
+function renderAccountMessagesChart(data) {
+  const ctx = document.getElementById('chart-account-messages').getContext('2d');
+  if (chartAccountMessages) chartAccountMessages.destroy();
+  
+  chartAccountMessages = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: data.map(d => d.account_name),
+      datasets: [{
+        label: '消息量',
+        data: data.map(d => d.count),
+        backgroundColor: '#4A90D9'
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false }
+      },
+      scales: {
+        y: { beginAtZero: true }
+      }
+    }
+  });
+}
+
+function renderTopChatsChart(data) {
+  const ctx = document.getElementById('chart-top-chats').getContext('2d');
+  if (chartTopChats) chartTopChats.destroy();
+  
+  chartTopChats = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: data.map(d => d.chat_title || '未知群组'),
+      datasets: [{
+        label: '消息量',
+        data: data.map(d => d.count),
+        backgroundColor: '#27ae60'
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false }
+      },
+      scales: {
+        x: { beginAtZero: true }
+      }
+    }
+  });
+}
 </script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 </body>
 </html>

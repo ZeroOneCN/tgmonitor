@@ -8,15 +8,15 @@
 
 | 文件 | 作用 |
 |------|------|
-| [web_app.py](web_app.py) | **Web 管理后台** — FastAPI 后端 |
-| [templates/index.html](templates/index.html) | Web 前端页面 |
-| [templates/login.html](templates/login.html) | 登录页面 |
-| [templates/setup.html](templates/setup.html) | 首次初始化管理员页面 |
-| [tg_helper.py](tg_helper.py) | 辅助工具：查 chat_id / user_id |
-| [config.json](config.json) | 配置文件（Web 界面自动管理） |
-| [requirements.txt](requirements.txt) | 依赖列表 |
-| [ecosystem.config.js](ecosystem.config.js) | PM2 进程管理配置 |
-| [tg-monitor.nginx.conf](tg-monitor.nginx.conf) | Nginx 反向代理配置示例 |
+| web_app.py | Web 管理后台 — FastAPI 后端 |
+| templates/index.html | Web 前端页面 |
+| templates/login.html | 登录页面 |
+| templates/setup.html | 首次初始化管理员页面 |
+| tg_helper.py | 辅助工具：查 chat_id / user_id |
+| config.json | 配置文件（Web 界面自动管理） |
+| [requirements.txt | 依赖列表 |
+| ecosystem.config.js | PM2 进程管理配置 |
+| tg-monitor.nginx.conf | Nginx 反向代理配置示例 |
 | session_xxx.session | 登录会话文件（每个账号各一个，自动生成） |
 | history.db | 历史消息记录数据库（自动生成） |
 | monitor.log | 运行日志 |
@@ -28,7 +28,7 @@
 ### 1. 安装依赖
 
 ```bash
-cd 007Telegram群消息监控工具
+cd tgmonitor
 pip install -r requirements.txt
 ```
 
@@ -173,7 +173,7 @@ python tg_helper.py chats -a 1
 A: 持续运行的情况下 session **永久有效**。长期间隔（1-2 个月）未使用可能过期，需要重新登录。
 
 **Q: my.telegram.org 创建不了应用怎么办？**
-A: 请自行搜索对应的公开 API 信息，或使用官方客户端 API 作为兜底方案。
+A: 请自行搜索对应的公开 API 信息以及重新尝试创建。
 
 **Q: 会封号吗？**
 A: 只收消息不群发，正常使用无风险。
@@ -195,15 +195,15 @@ A: 在 Web 界面点击规则旁的「编辑」按钮即可修改，修改后点
 
 ```bash
 # 在服务器上
-mkdir -p /opt/tg-monitor
-# 将整个 007Telegram群消息监控工具 目录上传到 /opt/tg-monitor
+mkdir -p /www/tg-monitor
+# 将整个 tgmonitor 目录上传到 /www/tg-monitor
 # 可以使用 scp / rsync 或 git clone
 ```
 
 ### 2. 安装依赖
 
 ```bash
-cd /opt/tg-monitor
+cd /www/tg-monitor
 pip install -r requirements.txt
 ```
 
@@ -216,7 +216,7 @@ npm install -g pm2
 ### 4. 启动服务
 
 ```bash
-cd /opt/tg-monitor
+cd /www/tg-monitor
 pm2 start ecosystem.config.js
 pm2 save
 pm2 startup   # 设置开机自启

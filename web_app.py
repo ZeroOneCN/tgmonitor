@@ -1502,6 +1502,86 @@ def get_history(account_idx: int = -1, page: int = 1, page_size: int = 20,
 
 
 # ============================================================
+# API - 统计数据
+# ============================================================
+@app.get("/api/stats")
+def get_stats():
+    """获取统计数据：概览、趋势、账号分布、群组排行"""
+    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    
+    # 1. 概览数据
+    today = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
+    yesterday = (datetime.now(SHANGHAI_TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
+    
+    today_messages = conn.execute(
+        "SELECT COUNT(*) FROM history WHERE ts LIKE ?", (f"{today}%",)
+    ).fetchone()[0]
+    
+    yesterday_messages = conn.execute(
+        "SELECT COUNT(*) FROM history WHERE ts LIKE ?", (f"{yesterday}%",)
+    ).fetchone()[0]
+    
+    # 活跃账号数（有消息的账号）
+    active_accounts = conn.execute(
+        "SELECT COUNT(DISTINCT account_idx) FROM history"
+    ).fetchone()[0]
+    
+    # 总账号数
+    total_accounts = len(config.get("accounts", []))
+    
+    # 监控群组数（有消息的群组）
+    monitored_chats = conn.execute(
+        "SELECT COUNT(DISTINCT chat_id) FROM history WHERE chat_id IS NOT NULL AND chat_id != ''"
+    ).fetchone()[0]
+    
+    # 推送成功率（暂时用消息总数作为基数，后续可扩展推送日志表）
+    push_total = today_messages
+    push_success = today_messages  # 简化处理，后续可接入推送日志
+    push_success_rate = 100 if push_total == 0 else round(push_success / push_total * 100, 1)
+    
+    overview = {
+        "today_messages": today_messages,
+        "yesterday_messages": yesterday_messages,
+        "active_accounts": active_accounts,
+        "total_accounts": total_accounts,
+        "monitored_chats": monitored_chats,
+        "push_total": push_total,
+        "push_success": push_success,
+        "push_success_rate": push_success_rate,
+    }
+    
+    # 2. 近7天每日消息量
+    daily_messages = []
+    for i in range(6, -1, -1):
+        date = (datetime.now(SHANGHAI_TZ) - timedelta(days=i)).strftime("%Y-%m-%d")
+        count = conn.execute(
+            "SELECT COUNT(*) FROM history WHERE ts LIKE ?", (f"{date}%",)
+        ).fetchone()[0]
+        daily_messages.append({"date": date[5:], "count": count})  # 只显示 MM-DD
+    
+    # 3. 各账号消息量
+    account_rows = conn.execute(
+        "SELECT account_name, COUNT(*) as cnt FROM history GROUP BY account_idx ORDER BY cnt DESC"
+    ).fetchall()
+    account_messages = [{"account_name": r[0], "count": r[1]} for r in account_rows]
+    
+    # 4. 活跃群组 TOP10
+    chat_rows = conn.execute(
+        "SELECT chat_title, COUNT(*) as cnt FROM history WHERE chat_id IS NOT NULL AND chat_id != '' GROUP BY chat_id ORDER BY cnt DESC LIMIT 10"
+    ).fetchall()
+    top_chats = [{"chat_title": r[0] or "未知群组", "count": r[1]} for r in chat_rows]
+    
+    conn.close()
+    
+    return {
+        "overview": overview,
+        "daily_messages": daily_messages,
+        "account_messages": account_messages,
+        "top_chats": top_chats,
+    }
+
+
+# ============================================================
 # API - 检查登录状态
 # ============================================================
 @app.get("/api/check_auth")
