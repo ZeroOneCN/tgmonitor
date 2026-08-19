@@ -386,6 +386,12 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
           <label>关键词</label>
           <input class="form-control" id="history-keyword" placeholder="搜索消息/发送者/群组" onkeyup="if(event.key==='Enter')loadHistory()">
         </div>
+        <div class="form-group" style="display:flex;align-items:center;margin-top:6px;">
+          <label style="display:flex;align-items:center;gap:6px;margin:0;white-space:nowrap;">
+            <input type="checkbox" id="history-star-only" onchange="loadHistory()">
+            只看收藏
+          </label>
+        </div>
         <div class="form-group">
           <button class="btn btn-primary" onclick="loadHistory()" style="margin-top:6px;">查询</button>
           <button class="btn btn-secondary" onclick="resetHistoryFilter()" style="margin-top:6px;">重置</button>
@@ -1400,6 +1406,7 @@ async function loadHistory(page) {
   const dateFrom = document.getElementById('history-date-from').value;
   const dateTo = document.getElementById('history-date-to').value;
   const keyword = document.getElementById('history-keyword').value.trim();
+  const starOnly = document.getElementById('history-star-only').checked;
   const listEl = document.getElementById('history-list');
   const paginationEl = document.getElementById('history-pagination');
 
@@ -1412,6 +1419,7 @@ async function loadHistory(page) {
     if (dateFrom) params.set('date_from', dateFrom);
     if (dateTo) params.set('date_to', dateTo);
     if (keyword) params.set('keyword', keyword);
+    if (starOnly) params.set('star_only', '1');
 
     const res = await api('GET', `/api/history?${params.toString()}`);
     const items = res.items || [];
@@ -1445,9 +1453,10 @@ async function loadHistory(page) {
       return `
         <div class="rule-item" style="flex-direction: column; align-items: stretch;">
           <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:4px;">
-            <div style="font-size:13px;font-weight:500;color:#2d3436;">
+            <div style="font-size:13px;font-weight:500;color:#2d3436;display:flex;align-items:center;gap:6px;">
               <span style="color:#636e72;font-size:12px;">${escHtml(item.ts)}</span>
               <span style="margin-left:8px;color:#4A90D9;">${escHtml(item.account_name)}</span>
+              <span onclick="toggleStar(${item.id}, this)" title="${item.starred ? '取消收藏' : '收藏'}" style="cursor:pointer;font-size:14px;color:${item.starred ? '#f5b301' : '#ccc'};">${item.starred ? '&#9733;' : '&#9734;'}</span>
             </div>
             <div style="font-size:12px;color:#636e72;display:flex;align-items:center;gap:8px;">
               <span>${escHtml(item.rule_remark)}</span>
@@ -1505,8 +1514,22 @@ function resetHistoryFilter() {
   document.getElementById('history-date-from').value = '';
   document.getElementById('history-date-to').value = '';
   document.getElementById('history-keyword').value = '';
+  document.getElementById('history-star-only').checked = false;
   historyPage = 1;
   loadHistory();
+}
+
+// 切换历史消息收藏状态
+async function toggleStar(id, el) {
+  try {
+    const res = await api('POST', `/api/history/${id}/star`);
+    const starred = !!res.starred;
+    el.style.color = starred ? '#f5b301' : '#ccc';
+    el.title = starred ? '取消收藏' : '收藏';
+    el.innerHTML = starred ? '&#9733;' : '&#9734;';
+  } catch (e) {
+    showAlert('切换收藏失败: ' + e.message);
+  }
 }
 
 // 按当前筛选条件批量导出历史消息为 CSV

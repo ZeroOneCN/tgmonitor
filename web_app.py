@@ -207,6 +207,7 @@ def init_history_db():
             msg_id TEXT DEFAULT '',
             topic_id TEXT DEFAULT '',
             topic_name TEXT DEFAULT '',
+            starred INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         )
     """)
@@ -221,6 +222,8 @@ def init_history_db():
             conn.execute("ALTER TABLE history ADD COLUMN topic_id TEXT DEFAULT ''")
         if "topic_name" not in cols:
             conn.execute("ALTER TABLE history ADD COLUMN topic_name TEXT DEFAULT ''")
+        if "starred" not in cols:
+            conn.execute("ALTER TABLE history ADD COLUMN starred INTEGER DEFAULT 0")
     except Exception:
         pass
     # 去重唯一索引：(account_idx, msg_id)，保证同账号同消息不重复入库
@@ -1864,7 +1867,7 @@ def run_cleanup_now():
 # ============================================================
 @app.get("/api/history")
 def get_history(account_idx: int = -1, page: int = 1, page_size: int = 20,
-                date_from: str = "", date_to: str = "", keyword: str = ""):
+                date_from: str = "", date_to: str = "", keyword: str = "", star_only: int = 0):
     conn = sqlite3.connect(str(HISTORY_DB_PATH))
     conditions = []
     params = []
@@ -1877,6 +1880,8 @@ def get_history(account_idx: int = -1, page: int = 1, page_size: int = 20,
     if date_to:
         conditions.append("ts <= ?")
         params.append(date_to + " 23:59:59")
+    if star_only:
+        conditions.append("starred = 1")
     if keyword:
         kw_fts_ids = None
         if len(keyword.strip()) >= 3:
@@ -1906,7 +1911,7 @@ def get_history(account_idx: int = -1, page: int = 1, page_size: int = 20,
     # 分页
     offset = (page - 1) * page_size
     rows = conn.execute(
-        f"SELECT id, ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, media_path, rule_remark FROM history {where} ORDER BY id DESC LIMIT ? OFFSET ?",
+        f"SELECT id, ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, media_path, rule_remark, topic_id, topic_name, starred FROM history {where} ORDER BY id DESC LIMIT ? OFFSET ?",
         params + [page_size, offset]
     ).fetchall()
     conn.close()
@@ -1916,6 +1921,7 @@ def get_history(account_idx: int = -1, page: int = 1, page_size: int = 20,
             "id": r[0], "ts": r[1], "account_name": r[2], "account_idx": r[3],
             "chat_title": r[4], "chat_id": r[5], "sender_name": r[6], "sender_id": r[7],
             "text": r[8], "has_media": bool(r[9]), "media_type": r[10], "media_path": r[11] or "", "rule_remark": r[12],
+            "topic_id": r[13] or "", "topic_name": r[14] or "", "starred": 1 if r[15] else 0,
         })
     return {"items": items, "total": count, "page": page, "page_size": page_size}
 
@@ -1958,6 +1964,24 @@ def export_history(account_idx: int = -1, date_from: str = "", date_to: str = ""
     data = b"\xef\xbb\xbf" + sio.getvalue().encode("utf-8")
     return StreamingResponse(io.BytesIO(data), media_type="text/csv",
                              headers={"Content-Disposition": 'attachment; filename="history_export.csv"'})
+
+
+# ============================================================
+# API - 消息收藏/取消收藏
+# ============================================================
+@app.post("/api/history/{history_id}/star")
+def toggle_history_star(history_id: int):
+    """切换历史消息的收藏状态，返回切换后的状态"""
+    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    row = conn.execute("SELECT starred FROM history WHERE id = ?", (history_id,)).fetchone()
+    if row is None:
+        conn.close()
+        raise HTTPException(404, "消息不存在")
+    new_val = 0 if row[0] else 1
+    conn.execute("UPDATE history SET starred = ? WHERE id = ?", (new_val, history_id))
+    conn.commit()
+    conn.close()
+    return {"id": history_id, "starred": new_val}
 
 
 # ============================================================
