@@ -339,6 +339,28 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
         <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
       </div>
     </div>
+
+    <div class="settings-section" style="margin-top: 20px;">
+      <h3>历史数据自动清理</h3>
+      <p class="text-sm mb-8">开启后每天 03:30 自动删除超过保留天数的历史消息（清理前会自动备份）。</p>
+      <div class="form-row" style="align-items: end; flex-wrap: wrap;">
+        <div class="form-group">
+          <label>启用自动清理</label>
+          <div class="form-check" style="margin-top: 8px;">
+            <input type="checkbox" id="cleanup-enabled">
+            <label for="cleanup-enabled">开启</label>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>保留天数</label>
+          <input class="form-control" id="cleanup-days" type="number" min="1" max="365" value="30" style="width: 140px;">
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <button class="btn btn-outline btn-sm" onclick="runCleanupNow()">立即清理</button>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- 历史消息 -->
@@ -1093,8 +1115,23 @@ async function loadSettings() {
     if (webhooks.length === 0) {
       document.getElementById('webhook-list').innerHTML = '<div class="empty-state" style="padding:16px 0;">暂无 Webhook 配置</div>';
     }
+    // 清理配置
+    const cleanup = s.cleanup || {};
+    document.getElementById('cleanup-enabled').checked = !!cleanup.enabled;
+    document.getElementById('cleanup-days').value = cleanup.keep_days || 30;
   } catch (e) {
     console.error('加载设置失败:', e);
+  }
+}
+
+async function runCleanupNow() {
+  if (!confirm('确认立即清理早于保留天数的历史消息？清理前会自动备份数据库。')) return;
+  try {
+    await api('POST', '/api/cleanup', {});
+    showAlert('清理完成，旧历史已删除（已自动备份）');
+    loadHistory();
+  } catch (e) {
+    showAlert('清理失败: ' + e.message);
   }
 }
 
@@ -1166,8 +1203,13 @@ async function saveSettings() {
   }));
 
   try {
+    const cleanup = {
+      enabled: document.getElementById('cleanup-enabled').checked,
+      keep_days: parseInt(document.getElementById('cleanup-days').value || '30', 10) || 30,
+    };
     await api('PUT', '/api/settings', {
       webhooks,
+      cleanup,
     });
     showAlert('设置已保存');
   } catch (e) {

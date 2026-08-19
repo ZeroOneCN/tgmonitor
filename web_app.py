@@ -50,6 +50,10 @@ def default_config() -> dict:
                 "url": "",
             }
         ],
+        "cleanup": {
+            "enabled": False,
+            "keep_days": 30,
+        },
     }
 
 
@@ -124,6 +128,13 @@ class ConfigManager:
 
     def get_admin(self):
         return self.cfg.get("admin", {})
+
+    def get_cleanup(self) -> dict:
+        return self.cfg.get("cleanup", {"enabled": False, "keep_days": 30})
+
+    def set_cleanup(self, cleanup: dict):
+        self.cfg["cleanup"] = cleanup
+        self.save()
 
     def set_admin_password(self, username: str, password: str):
         salt = secrets.token_hex(16)
@@ -304,12 +315,35 @@ def start_backup_scheduler():
         from apscheduler.schedulers.background import BackgroundScheduler
         _sched = BackgroundScheduler(timezone="Asia/Shanghai")
         _sched.add_job(backup_database, "cron", hour=3, minute=0)
+        _sched.add_job(cleanup_history, "cron", hour=3, minute=30)
         _sched.start()
-        logger.info("自动备份任务已启动（每日 03:00，保留 7 天）")
+        logger.info("自动备份任务已启动（每日 03:00 备份，03:30 清理过期历史）")
     except ImportError:
         logger.warning("未安装 APScheduler，自动备份未启用（pip install APScheduler）")
     except Exception as e:
         logger.error(f"启动自动备份任务失败: {e}")
+
+
+def cleanup_history():
+    """定时清理过期历史消息：开启时删除超过保留天数的记录，清理前自动备份"""
+    try:
+        cfg = config.get_cleanup()
+        if not cfg.get("enabled"):
+            return
+        keep_days = int(cfg.get("keep_days") or 30)
+        if keep_days <= 0:
+            return
+        # 清理前先备份，防止误删
+        backup_database()
+        cutoff = (datetime.now(SHANGHAI_TZ) - timedelta(days=keep_days)).strftime("%Y-%m-%d %H:%M:%S")
+        conn = sqlite3.connect(str(HISTORY_DB_PATH))
+        cur = conn.execute("DELETE FROM history WHERE ts < ?", (cutoff,))
+        deleted = cur.rowcount
+        conn.commit()
+        conn.close()
+        logger.info(f"历史消息清理完成: 删除 {deleted} 条早于 {cutoff} 的记录")
+    except Exception as e:
+        logger.error(f"历史消息清理失败: {e}")
 
 
 # ============================================================
@@ -1641,6 +1675,7 @@ def get_status(idx: int):
 def get_settings():
     return {
         "webhooks": config.get_webhooks(),
+        "cleanup": config.get_cleanup(),
     }
 
 
@@ -1648,7 +1683,16 @@ def get_settings():
 def update_settings(data: dict):
     if "webhooks" in data:
         config.set_webhooks(data["webhooks"])
+    if "cleanup" in data:
+        config.set_cleanup(data["cleanup"])
     logger.info("已更新全局设置")
+    return {"status": "ok"}
+
+
+@app.post("/api/cleanup")
+def run_cleanup_now():
+    """立即执行历史消息清理（清理前自动备份）"""
+    cleanup_history()
     return {"status": "ok"}
 
 
