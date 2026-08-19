@@ -389,6 +389,7 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
         <div class="form-group">
           <button class="btn btn-primary" onclick="loadHistory()" style="margin-top:6px;">查询</button>
           <button class="btn btn-secondary" onclick="resetHistoryFilter()" style="margin-top:6px;">重置</button>
+          <button class="btn btn-outline" onclick="exportHistory()" style="margin-top:6px;">&#128196; 导出CSV</button>
         </div>
       </div>
     </div>
@@ -1450,14 +1451,14 @@ async function loadHistory(page) {
             </div>
             <div style="font-size:12px;color:#636e72;display:flex;align-items:center;gap:8px;">
               <span>${escHtml(item.rule_remark)}</span>
-              <span style="display:inline-block;min-width:160px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;" title="${escHtml(item.chat_title)}">${escHtml(item.chat_title)}</span>
-              ${item.topic_name && item.topic_name !== '' ? `<span style="display:inline-block;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;background:#e8f1fd;color:#4A90D9;border-radius:4px;padding:0 6px;font-size:11px;" title="#${escHtml(item.topic_name)}">#${escHtml(item.topic_name)}</span>` : ''}
+              <span style="display:inline-block;min-width:160px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;" title="${escHtml(item.chat_title)}">${highlightKw(item.chat_title, keyword)}</span>
+              ${item.topic_name && item.topic_name !== '' ? `<span style="display:inline-block;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;background:#e8f1fd;color:#4A90D9;border-radius:4px;padding:0 6px;font-size:11px;" title="#${escHtml(item.topic_name)}">#${highlightKw(item.topic_name, keyword)}</span>` : ''}
             </div>
           </div>
           <div style="margin-top:6px;font-size:13px;color:#2d3436;display:flex;align-items:center;gap:6px;">
-            <span style="color:#b2bec3;font-size:12px;">${escHtml(item.sender_name)}</span>
+            <span style="color:#b2bec3;font-size:12px;">${highlightKw(item.sender_name, keyword)}</span>
             <span style="color:#b2bec3;">:</span>
-            <span style="word-break:break-all;">${escHtml(item.text || '(无文本)')}</span>
+            <span style="word-break:break-all;">${highlightKw(item.text || '(无文本)', keyword)}</span>
             ${mediaIcon ? `<span style="font-size:16px;" title="${item.media_type}">${mediaIcon}</span>` : ''}
           </div>
           ${mediaHtml}
@@ -1487,12 +1488,44 @@ async function loadHistory(page) {
   }
 }
 
+// 关键词高亮：先转义防 XSS，再对命中词包 <mark>
+function highlightKw(str, kw) {
+  const escaped = escHtml(str == null ? '' : str);
+  if (!kw) return escaped;
+  const escKw = escHtml(kw).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (!escKw) return escaped;
+  return escaped.split(new RegExp('(' + escKw + ')', 'gi')).map((part, i) =>
+    i % 2
+      ? `<mark style="background:#ffe58f;color:#ad6800;padding:0 2px;border-radius:2px;">${part}</mark>`
+      : part
+  ).join('');
+}
+
 function resetHistoryFilter() {
   document.getElementById('history-date-from').value = '';
   document.getElementById('history-date-to').value = '';
   document.getElementById('history-keyword').value = '';
   historyPage = 1;
   loadHistory();
+}
+
+// 按当前筛选条件批量导出历史消息为 CSV
+function exportHistory() {
+  const accountIdx = document.getElementById('history-account').value;
+  const dateFrom = document.getElementById('history-date-from').value;
+  const dateTo = document.getElementById('history-date-to').value;
+  const keyword = document.getElementById('history-keyword').value.trim();
+  const params = new URLSearchParams();
+  if (accountIdx !== '-1') params.set('account_idx', accountIdx);
+  if (dateFrom) params.set('date_from', dateFrom);
+  if (dateTo) params.set('date_to', dateTo);
+  if (keyword) params.set('keyword', keyword);
+  const a = document.createElement('a');
+  a.href = `/api/history/export?${params.toString()}`;
+  a.download = 'history_export.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
 }
 
 // ============================================================

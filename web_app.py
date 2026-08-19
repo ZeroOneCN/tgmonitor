@@ -6,6 +6,8 @@ Telegram 多账号监控工具 - Web 管理后台 (FastAPI)
 """
 
 import asyncio
+import csv
+import io
 import json
 import logging
 import sqlite3
@@ -21,7 +23,7 @@ from typing import Optional
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
-from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
@@ -1916,6 +1918,46 @@ def get_history(account_idx: int = -1, page: int = 1, page_size: int = 20,
             "text": r[8], "has_media": bool(r[9]), "media_type": r[10], "media_path": r[11] or "", "rule_remark": r[12],
         })
     return {"items": items, "total": count, "page": page, "page_size": page_size}
+
+
+# ============================================================
+# API - 批量导出历史消息（CSV，UTF-8 BOM 便于 Excel 打开）
+# ============================================================
+@app.get("/api/history/export")
+def export_history(account_idx: int = -1, date_from: str = "", date_to: str = "", keyword: str = ""):
+    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    conditions = []
+    params = []
+    if account_idx >= 0:
+        conditions.append("account_idx = ?")
+        params.append(account_idx)
+    if date_from:
+        conditions.append("ts >= ?")
+        params.append(date_from)
+    if date_to:
+        conditions.append("ts <= ?")
+        params.append(date_to + " 23:59:59")
+    if keyword:
+        conditions.append("(text LIKE ? OR sender_name LIKE ? OR chat_title LIKE ?)")
+        kw = f"%{keyword}%"
+        params.extend([kw, kw, kw])
+    where = "WHERE " + " AND ".join(conditions) if conditions else ""
+    rows = conn.execute(
+        f"SELECT ts, account_name, chat_title, topic_name, sender_name, sender_id, text, has_media, media_type, media_path, rule_remark FROM history {where} ORDER BY id DESC",
+        params
+    ).fetchall()
+    conn.close()
+
+    sio = io.StringIO()
+    writer = csv.writer(sio)
+    writer.writerow(["时间", "账号", "群组", "话题", "发送者", "发送者ID", "规则", "媒体", "内容"])
+    for r in rows:
+        text = (r[6] or "").replace("\r", " ").replace("\n", " ")
+        media = MEDIA_CN.get(r[8], r[8]) if r[7] else ""
+        writer.writerow([r[0], r[1], r[2] or "", r[3] or "", r[4] or "", r[5] or "", r[10] or "", media, text])
+    data = b"\xef\xbb\xbf" + sio.getvalue().encode("utf-8")
+    return StreamingResponse(io.BytesIO(data), media_type="text/csv",
+                             headers={"Content-Disposition": 'attachment; filename="history_export.csv"'})
 
 
 # ============================================================
