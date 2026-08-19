@@ -1156,7 +1156,7 @@ function renderWebhookRow(wh, idx) {
         </div>
       </div>
       <div class="form-group" style="margin-bottom:0;">
-        <label>Webhook URL <span class="hint">方式B：通用Webhook，POST JSON</span></label>
+        <label>Webhook URL <span class="hint">方式B：通用Webhook，POST JSON（支持企微/飞书/钉钉，自动识别）</span></label>
         <input class="form-control wh-input" id="wh-${idx}-url" value="${escHtml(wh.url || '')}" placeholder="https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=...">
       </div>
     </div>

@@ -233,6 +233,34 @@ def init_history_db():
         )
     """)
     
+    # FTS5 全文索引（trigram 分词，支持中文；失败时自动跳过，不影响现有 LIKE 搜索）
+    try:
+        conn.execute("""
+            CREATE VIRTUAL TABLE IF NOT EXISTS history_fts USING fts5(
+                text, sender_name, chat_title,
+                content='history', content_rowid='id',
+                tokenize='trigram'
+            )
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS history_ai AFTER INSERT ON history BEGIN
+                INSERT INTO history_fts(rowid, text, sender_name, chat_title)
+                VALUES (new.id, new.text, new.sender_name, new.chat_title);
+            END
+        """)
+        conn.execute("""
+            CREATE TRIGGER IF NOT EXISTS history_ad AFTER DELETE ON history BEGIN
+                INSERT INTO history_fts(history_fts, rowid, text, sender_name, chat_title)
+                VALUES ('delete', old.id, old.text, old.sender_name, old.chat_title);
+            END
+        """)
+        # 首次使用或索引为空时重建，保证历史数据也可被搜索
+        cnt = conn.execute("SELECT COUNT(*) FROM history_fts").fetchone()[0]
+        if cnt == 0:
+            conn.execute("INSERT INTO history_fts(history_fts) VALUES ('rebuild')")
+    except Exception as e:
+        logger.warning(f"FTS5 全文索引未启用（可忽略）: {e}")
+    
     conn.commit()
     conn.close()
 
@@ -625,6 +653,10 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
             channel_type = "telegram_bot"
         elif "qyapi.weixin.qq.com" in url:
             channel_type = "wecom"
+        elif "open.feishu.cn" in url or "open.larksuite.com" in url:
+            channel_type = "feishu"
+        elif "oapi.dingtalk.com" in url:
+            channel_type = "dingtalk"
         else:
             channel_type = "generic"
         
@@ -750,6 +782,26 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                                 logger.warning(f"  Webhook [{idx}] 媒体推送失败: {err2[:200]}")
                         else:
                             logger.warning(f"  Webhook [{idx}] 媒体上传失败")
+        elif "open.feishu.cn" in url or "open.larksuite.com" in url:
+            # 飞书机器人：支持文本 / 富文本
+            payload = {"msg_type": "text", "content": {"text": alert_text}}
+            ok, err_msg, retry_count = await _post_with_retry(url, payload)
+            if ok:
+                logger.info(f"  Webhook [{idx}] (飞书) 推送成功{'（重试%d次）' % retry_count if retry_count else ''}")
+            else:
+                logger.warning(f"  Webhook [{idx}] (飞书) 推送失败: {err_msg[:200]}")
+                push_status = "failed"
+                error_msg = err_msg[:500]
+        elif "oapi.dingtalk.com" in url:
+            # 钉钉机器人：支持 markdown 富文本
+            payload = {"msgtype": "markdown", "markdown": {"title": "Telegram消息转发", "text": alert_text}}
+            ok, err_msg, retry_count = await _post_with_retry(url, payload)
+            if ok:
+                logger.info(f"  Webhook [{idx}] (钉钉) 推送成功{'（重试%d次）' % retry_count if retry_count else ''}")
+            else:
+                logger.warning(f"  Webhook [{idx}] (钉钉) 推送失败: {err_msg[:200]}")
+                push_status = "failed"
+                error_msg = err_msg[:500]
         else:
             payload = {"title": "Telegram监控告警", "text": alert_text, "source": "tg_monitor"}
             ok, err_msg, retry_count = await _post_with_retry(url, payload)
@@ -1715,9 +1767,28 @@ def get_history(account_idx: int = -1, page: int = 1, page_size: int = 20,
         conditions.append("ts <= ?")
         params.append(date_to + " 23:59:59")
     if keyword:
-        conditions.append("(text LIKE ? OR sender_name LIKE ? OR chat_title LIKE ?)")
-        kw = f"%{keyword}%"
-        params.extend([kw, kw, kw])
+        kw_fts_ids = None
+        if len(keyword.strip()) >= 3:
+            # 优先用 FTS5 全文索引加速（trigram，适合中文），失败则回退 LIKE
+            try:
+                found = conn.execute(
+                    "SELECT rowid FROM history_fts WHERE history_fts MATCH ?",
+                    (f'"{keyword.strip()}"',)
+                ).fetchall()
+                kw_fts_ids = [r[0] for r in found]
+            except Exception:
+                kw_fts_ids = None
+        if kw_fts_ids:
+            if kw_fts_ids:
+                placeholders = ",".join("?" * len(kw_fts_ids))
+                conditions.append(f"id IN ({placeholders})")
+                params.extend(kw_fts_ids)
+            else:
+                conditions.append("1=0")  # 全文索引无匹配，直接返回空
+        else:
+            conditions.append("(text LIKE ? OR sender_name LIKE ? OR chat_title LIKE ?)")
+            kw = f"%{keyword}%"
+            params.extend([kw, kw, kw])
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     # 总数
     count = conn.execute(f"SELECT COUNT(*) FROM history {where}", params).fetchone()[0]
