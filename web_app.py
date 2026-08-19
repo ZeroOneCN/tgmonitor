@@ -622,23 +622,30 @@ def start_backup_scheduler():
 
 
 def cleanup_history():
-    """定时清理过期历史消息：开启时删除超过保留天数的记录，清理前自动备份"""
+    """定时清理过期历史消息：按每个用户各自的清理设置，仅删除该用户超过保留天数的记录，清理前自动备份"""
     try:
-        cfg = config.get_cleanup()
-        if not cfg.get("enabled"):
-            return
-        keep_days = int(cfg.get("keep_days") or 30)
-        if keep_days <= 0:
-            return
         # 清理前先备份，防止误删
         backup_database()
-        cutoff = (datetime.now(SHANGHAI_TZ) - timedelta(days=keep_days)).strftime("%Y-%m-%d %H:%M:%S")
-        conn = sqlite3.connect(str(HISTORY_DB_PATH))
-        cur = conn.execute("DELETE FROM history WHERE ts < ?", (cutoff,))
-        deleted = cur.rowcount
-        conn.commit()
-        conn.close()
-        logger.info(f"历史消息清理完成: 删除 {deleted} 条早于 {cutoff} 的记录")
+        # 读取所有用户的清理设置（多租户各自独立）
+        uconn = _users_conn()
+        users = uconn.execute("SELECT id, cleanup FROM users").fetchall()
+        uconn.close()
+        hist = sqlite3.connect(str(HISTORY_DB_PATH))
+        deleted = 0
+        for u in users:
+            clean = json.loads(u["cleanup"] or "{}")
+            if not clean.get("enabled"):
+                continue
+            keep_days = int(clean.get("keep_days") or 30)
+            if keep_days <= 0:
+                continue
+            cutoff = (datetime.now(SHANGHAI_TZ) - timedelta(days=keep_days)).strftime("%Y-%m-%d %H:%M:%S")
+            cur = hist.execute("DELETE FROM history WHERE user_id=? AND ts<?", (u["id"], cutoff))
+            deleted += cur.rowcount
+        hist.commit()
+        hist.close()
+        if deleted:
+            logger.info(f"历史消息清理完成: 删除 {deleted} 条过期记录")
     except Exception as e:
         logger.error(f"历史消息清理失败: {e}")
 
@@ -2020,6 +2027,38 @@ async def reset_user_password(user_id: int, request: Request, data: dict):
     return {"status": "ok", "message": f"用户 {target['username']} 密码已重置"}
 
 
+# --- 修改本人密码（管理员/普通用户通用） ---
+@app.post("/api/change-password")
+def change_password(request: Request, data: dict):
+    """当前登录用户修改自己的密码"""
+    user = verify_session(request)
+    if not user:
+        raise HTTPException(401, "未登录")
+    old = data.get("old_password", "") or ""
+    new = (data.get("new_password") or "").strip()
+    if len(new) < 6:
+        return {"status": "error", "message": "新密码长度至少6位"}
+    if hash_password(old, user["password_salt"]) != user["password_hash"]:
+        return {"status": "error", "message": "当前密码不正确"}
+    salt = secrets.token_hex(16)
+    conn = _users_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET password_hash=?, password_salt=? WHERE id=?",
+            (hash_password(new, salt), salt, user["id"]),
+        )
+        # 修改密码后强制下线其它会话，当前会话保留
+        conn.execute(
+            "DELETE FROM sessions WHERE user_id=? AND token<>?",
+            (user["id"], request.cookies.get("session_token", "")),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info(f"[用户] {user['username']} 修改了自己的密码")
+    return {"status": "ok", "message": "密码修改成功"}
+
+
 # 全局鉴权中间件：未登录跳转 /login
 from fastapi import Depends
 from fastapi.security import APIKeyCookie
@@ -2469,10 +2508,14 @@ def update_settings(request: Request, data: dict):
 
 @app.post("/api/cleanup")
 def run_cleanup_now(request: Request):
-    """立即执行历史消息清理（仅当前用户数据，清理前自动备份）"""
-    user_id, _ = _user_ctx(request)
+    """立即执行历史消息清理（仅当前用户数据，按本人保留天数设置，清理前自动备份）"""
+    user_id, cfg = _user_ctx(request)
+    clean = cfg.get("cleanup") or {}
+    keep_days = int(clean.get("keep_days") or 30)
+    if keep_days <= 0:
+        keep_days = 30
     backup_database()
-    cutoff = (datetime.now(SHANGHAI_TZ) - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    cutoff = (datetime.now(SHANGHAI_TZ) - timedelta(days=keep_days)).strftime("%Y-%m-%d %H:%M:%S")
     conn = sqlite3.connect(str(HISTORY_DB_PATH))
     try:
         cur = conn.execute("DELETE FROM history WHERE user_id = ? AND ts < ?", (user_id, cutoff))
@@ -2652,7 +2695,7 @@ def get_stats(request: Request):
     push_success = conn.execute(
         "SELECT COUNT(*) FROM push_logs WHERE user_id = ? AND ts LIKE ? AND status = 'success'", (user_id, f"{today}%")
     ).fetchone()[0]
-    push_success_rate = 100 if push_total == 0 else round(push_success / push_total * 100, 1)
+    push_success_rate = 0 if push_total == 0 else round(push_success / push_total * 100, 1)
     
     overview = {
         "today_messages": today_messages,

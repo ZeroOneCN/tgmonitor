@@ -47,6 +47,10 @@ main { padding: 24px; width: 100%; }
   gap: 16px;
   margin-bottom: 24px;
 }
+/* 全局概览卡片：固定一行四个 */
+#overview-cards { grid-template-columns: repeat(4, 1fr); }
+@media (max-width: 900px) { #overview-cards { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 560px) { #overview-cards { grid-template-columns: 1fr; } }
 .stat-card {
   background: #fff; border-radius: 10px; padding: 20px;
   box-shadow: 0 1px 4px rgba(0,0,0,0.06); border: 1px solid #e8eaed;
@@ -367,8 +371,31 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
     </div>
 
     <div class="settings-section" style="margin-top: 20px;">
+      <h3>账号安全</h3>
+      <p class="text-sm mb-8">修改当前登录账号的密码（修改后其它登录会话将自动下线）。</p>
+      <div class="form-row" style="align-items: end; flex-wrap: wrap;">
+        <div class="form-group">
+          <label>当前密码</label>
+          <input class="form-control" id="cp-old-pass" type="password" placeholder="当前密码" style="width: 180px;">
+        </div>
+        <div class="form-group">
+          <label>新密码</label>
+          <input class="form-control" id="cp-new-pass" type="password" placeholder="至少6位" style="width: 180px;">
+        </div>
+        <div class="form-group">
+          <label>确认新密码</label>
+          <input class="form-control" id="cp-new-pass2" type="password" placeholder="再次输入新密码" style="width: 180px;">
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <button class="btn btn-primary btn-sm" onclick="changePassword()" style="width:100%;">修改密码</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section" id="service-status-section" style="margin-top: 20px; display:none;">
       <h3>服务状态</h3>
-      <div class="text-sm mb-8">服务健康检查与一键重启（重启时会短暂中断，由 PM2 自动拉起）。</div>
+      <div class="text-sm mb-8">服务健康检查与一键重启（仅管理员可见，重启时会短暂中断，由 PM2 自动拉起）。</div>
       <div class="form-row" style="align-items: center; flex-wrap: wrap;">
         <div class="form-group">
           <label>检查时间</label>
@@ -380,7 +407,7 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
         </div>
         <div class="form-group" style="margin-left: auto;">
           <button class="btn btn-outline btn-sm" onclick="checkHealth()">健康检查</button>
-          <button class="btn btn-danger btn-sm" onclick="adminRestart()" id="admin-restart-btn" style="display:none;">一键重启</button>
+          <button class="btn btn-danger btn-sm" onclick="adminRestart()" id="admin-restart-btn">一键重启</button>
         </div>
       </div>
     </div>
@@ -750,6 +777,20 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
   </div>
 </div>
 
+<!-- 自定义输入弹窗 (Prompt，替换原生 prompt) -->
+<div class="modal-overlay" id="prompt-modal">
+  <div class="modal" style="max-width: 400px;">
+    <button class="modal-close" onclick="closePrompt(false)">&times;</button>
+    <h2 id="prompt-title">请输入</h2>
+    <p id="prompt-message" style="font-size: 14px; color: #636e72; margin: 12px 0 10px;"></p>
+    <input class="form-control" id="prompt-input" placeholder="请输入内容">
+    <div class="modal-footer" style="margin-top: 16px;">
+      <button class="btn btn-secondary" onclick="closePrompt(false)">取消</button>
+      <button class="btn btn-primary" onclick="closePrompt(true)">确定</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ============================================================
 // 状态
@@ -797,8 +838,32 @@ function closeDialog(result) {
   closeModal('dialog-modal');
   if (_dialogResolve) {
     _dialogResolve(result);
-    _dialogResolve = null;
   }
+  _dialogResolve = null;
+}
+
+// ============================================================
+// 自定义输入弹窗 (替换原生 prompt)
+// ============================================================
+let _promptResolve = null;
+
+function showPrompt(message, defaultValue = '') {
+  return new Promise(resolve => {
+    _promptResolve = resolve;
+    document.getElementById('prompt-message').textContent = message;
+    const input = document.getElementById('prompt-input');
+    input.value = defaultValue || '';
+    openModal('prompt-modal');
+    setTimeout(() => { input.select(); input.focus(); }, 50);
+  });
+}
+
+function closePrompt(ok) {
+  closeModal('prompt-modal');
+  if (_promptResolve) {
+    _promptResolve(ok ? document.getElementById('prompt-input').value.trim() : null);
+  }
+  _promptResolve = null;
 }
 
 // ============================================================
@@ -1286,7 +1351,7 @@ async function applyRuleTemplate() {
 // 保存当前规则为模板
 async function saveAsTemplate() {
   const remark = document.getElementById('rule-remark').value.trim();
-  const name = await prompt('输入模板名称：', remark || '新模板');
+  const name = await showPrompt('输入模板名称：', remark || '新模板');
   if (!name) return;
   try {
     await api('POST', '/api/rule-templates', { name, ...getRuleFormData() });
@@ -1331,7 +1396,7 @@ async function deleteRuleTemplate(name) {
 }
 
 async function renameRuleTemplate(oldName) {
-  const newName = await prompt('输入新的模板名称：', oldName);
+  const newName = await showPrompt('输入新的模板名称：', oldName);
   if (!newName || newName === oldName) return;
   try {
     const templates = await api('GET', '/api/rule-templates');
@@ -1451,7 +1516,7 @@ async function loadSettings() {
 }
 
 async function runCleanupNow() {
-  if (!confirm('确认立即清理早于保留天数的历史消息？清理前会自动备份数据库。')) return;
+  if (!await showConfirm('确认立即清理早于保留天数的历史消息？清理前会自动备份数据库。')) return;
   try {
     await api('POST', '/api/cleanup', {});
     showAlert('清理完成，旧历史已删除（已自动备份）');
@@ -1543,6 +1608,25 @@ async function saveSettings() {
   }
 }
 
+// 修改当前用户密码（管理员/普通用户通用）
+async function changePassword() {
+  const oldPass = document.getElementById('cp-old-pass').value;
+  const newPass = document.getElementById('cp-new-pass').value;
+  const newPass2 = document.getElementById('cp-new-pass2').value;
+  if (!oldPass || !newPass) { showAlert('请填写当前密码和新密码'); return; }
+  if (newPass.length < 6) { showAlert('新密码长度至少6位'); return; }
+  if (newPass !== newPass2) { showAlert('两次输入的新密码不一致'); return; }
+  if (!await showConfirm('确定修改密码？修改后其它登录会话将自动下线。')) return;
+  try {
+    const data = await api('POST', '/api/change-password', { old_password: oldPass, new_password: newPass });
+    if (data.status !== 'ok') { showAlert(data.message || '修改失败'); return; }
+    document.getElementById('cp-old-pass').value = '';
+    document.getElementById('cp-new-pass').value = '';
+    document.getElementById('cp-new-pass2').value = '';
+    showAlert(data.message);
+  } catch (e) { showAlert('修改失败: ' + e.message); }
+}
+
 // ============================================================
 // 实时日志 (WebSocket)
 // ============================================================
@@ -1589,8 +1673,8 @@ async function initAuth() {
       userEl.innerHTML = '&#128100; ' + escHtml(data.username) + roleText;
       if (data.role === 'admin') {
         document.getElementById('tab-btn-users').style.display = '';
-        const r = document.getElementById('admin-restart-btn');
-        if (r) r.style.display = '';
+        const s = document.getElementById('service-status-section');
+        if (s) s.style.display = '';
       }
     }
   } catch (e) { /* 未登录由后端重定向处理 */ }
@@ -1824,7 +1908,7 @@ async function adminRestart() {
   try {
     await api('POST', '/api/admin/restart', {});
     showAlert('服务重启指令已下发，正在重启...');
-    setTimeout(() => { if (confirm('重启中，稍后是否重新加载页面并刷新状态？请稍后手动刷新。')) window.location.reload(); }, 2500);
+    setTimeout(() => { if (window.confirm('重启中，稍后是否重新加载页面并刷新状态？')) window.location.reload(); }, 2500);
   } catch (e) { showAlert('重启失败: ' + e.message); }
 }
 
@@ -2054,9 +2138,12 @@ async function loadStats() {
     document.getElementById('stat-today-messages').textContent = res.overview.today_messages || 0;
     document.getElementById('stat-today-messages-sub').textContent = `昨日: ${res.overview.yesterday_messages || 0}`;
     
-    const successRate = res.overview.push_success_rate || 0;
-    document.getElementById('stat-push-success-rate').textContent = `${successRate}%`;
-    document.getElementById('stat-push-success-rate-sub').textContent = `成功: ${res.overview.push_success || 0} / 总计: ${res.overview.push_total || 0}`;
+    const pushTotal = res.overview.push_total || 0;
+    const pushSub = pushTotal > 0
+      ? `成功: ${res.overview.push_success || 0} / 总计: ${pushTotal}`
+      : `今日暂无推送 · 成功: 0 / 总计: 0`;
+    document.getElementById('stat-push-success-rate').textContent = pushTotal > 0 ? `${res.overview.push_success_rate || 0}%` : '无数据';
+    document.getElementById('stat-push-success-rate-sub').textContent = pushSub;
     
     document.getElementById('stat-active-accounts').textContent = res.overview.active_accounts || 0;
     document.getElementById('stat-active-accounts-sub').textContent = `总账号: ${res.overview.total_accounts || 0}`;
