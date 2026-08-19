@@ -1,25 +1,26 @@
-# Telegram 多账号监控工具
+# Telegram 多账号监控工具（单用户版）
 
-监控 Telegram 群或频道中**指定用户**的发言，支持**多账号同时监控**，自动转发到 Saved Messages + Webhook 手机推送（企业微信机器人 / Telegram Bot）。
+监控 Telegram 群或频道中**指定用户**的发言，支持**多个 Telegram 账号同时监控**，自动转发到 Saved Messages + Webhook 手机推送（企业微信机器人 / Telegram Bot）。
+
+> 本分支为**单用户版**：单实例、单一管理员使用，无多租户（多用户）登录体系。所有 Telegram 账号与规则在同一个实例内管理。
 
 ---
 
 ## 项目文件
 
+session_xxx.session 为登录会话文件（每个账号各一个，自动生成）；history.db 为历史消息记录数据库（自动生成）；monitor.log 为运行日志。其余核心文件如下：
+
 | 文件 | 作用 |
 |------|------|
-| [web_app.py](web_app.py) | **Web 管理后台** — FastAPI 后端 |
-| [templates/index.html](templates/index.html) | Web 前端页面 |
-| [templates/login.html](templates/login.html) | 登录页面 |
-| [templates/setup.html](templates/setup.html) | 首次初始化管理员页面 |
-| [tg_helper.py](tg_helper.py) | 辅助工具：查 chat_id / user_id |
-| [config.json](config.json) | 配置文件（Web 界面自动管理） |
-| [requirements.txt](requirements.txt) | 依赖列表 |
-| [ecosystem.config.js](ecosystem.config.js) | PM2 进程管理配置 |
-| [tg-monitor.nginx.conf](tg-monitor.nginx.conf) | Nginx 反向代理配置示例 |
-| session_xxx.session | 登录会话文件（每个账号各一个，自动生成） |
-| history.db | 历史消息记录数据库（自动生成） |
-| monitor.log | 运行日志 |
+| `web_app.py` | Web 管理后台 — FastAPI 后端 |
+| `templates/index.html` | Web 前端页面 |
+| `templates/login.html` | 登录页面 |
+| `templates/setup.html` | 首次初始化管理员页面 |
+| `tg_helper.py` | 辅助工具：查 chat_id / user_id |
+| `config.json` | 配置文件（Web 界面自动管理） |
+| `requirements.txt` | 依赖列表 |
+| `ecosystem.config.js` | PM2 进程管理配置 |
+| `tg-monitor.nginx.conf` | Nginx 反向代理配置示例 |
 
 ---
 
