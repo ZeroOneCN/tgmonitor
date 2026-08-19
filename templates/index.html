@@ -235,8 +235,12 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
     <button class="tab-btn" onclick="switchTab('history')">历史消息</button>
     <button class="tab-btn" onclick="switchTab('logs')">实时日志</button>
     <button class="tab-btn" onclick="switchTab('settings')">设置</button>
+    <button class="tab-btn" id="tab-btn-users" onclick="switchTab('users')" style="display:none;">用户管理</button>
   </nav>
-  <button class="btn btn-sm btn-secondary" onclick="logout()" style="flex-shrink:0;" title="退出登录">退出</button>
+  <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;">
+    <span id="current-user" style="font-size:13px;color:#636e72;"></span>
+    <button class="btn btn-sm btn-secondary" onclick="logout()" title="退出登录">退出</button>
+  </div>
 </header>
 
 <main>
@@ -363,6 +367,30 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
     </div>
   </section>
 
+  <!-- 用户管理（仅管理员可见） -->
+  <section id="tab-users" class="tab-content">
+    <div class="settings-section">
+      <div class="toolbar">
+        <button class="btn btn-primary" onclick="showAddUser()">+ 新建用户</button>
+        <button class="btn btn-secondary" onclick="loadUsers()">刷新</button>
+      </div>
+      <table class="history-table" style="width:100%;border-collapse:collapse;">
+        <thead>
+          <tr>
+            <th style="text-align:left;padding:10px 12px;border-bottom:2px solid #e8eaed;">用户名</th>
+            <th style="text-align:left;padding:10px 12px;border-bottom:2px solid #e8eaed;">角色</th>
+            <th style="text-align:left;padding:10px 12px;border-bottom:2px solid #e8eaed;">账号/规则</th>
+            <th style="text-align:left;padding:10px 12px;border-bottom:2px solid #e8eaed;">历史消息</th>
+            <th style="text-align:left;padding:10px 12px;border-bottom:2px solid #e8eaed;">状态</th>
+            <th style="text-align:left;padding:10px 12px;border-bottom:2px solid #e8eaed;">注册时间</th>
+            <th style="text-align:left;padding:10px 12px;border-bottom:2px solid #e8eaed;">操作</th>
+          </tr>
+        </thead>
+        <tbody id="user-list-body"></tbody>
+      </table>
+    </div>
+  </section>
+
   <!-- 历史消息 -->
   <section id="tab-history" class="tab-content">
     <div class="settings-section">
@@ -447,6 +475,33 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal('account-modal')">取消</button>
       <button class="btn btn-primary" onclick="saveAccount()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 新建用户模态框（仅管理员） -->
+<div class="modal-overlay" id="user-modal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('user-modal')">&times;</button>
+    <h2>新建用户</h2>
+    <div class="form-group">
+      <label>用户名 <span class="required">*</span></label>
+      <input class="form-control" id="user-username" placeholder="至少2个字符" autocomplete="off">
+    </div>
+    <div class="form-group">
+      <label>密码 <span class="required">*</span></label>
+      <input class="form-control" id="user-password" type="password" placeholder="至少6位" autocomplete="new-password">
+    </div>
+    <div class="form-group">
+      <label>角色</label>
+      <select class="form-control" id="user-role">
+        <option value="user">普通用户</option>
+        <option value="admin">管理员</option>
+      </select>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('user-modal')">取消</button>
+      <button class="btn btn-primary" onclick="saveNewUser()">创建</button>
     </div>
   </div>
 </div>
@@ -648,6 +703,7 @@ function switchTab(name) {
   if (name === 'accounts') loadAccounts();
   if (name === 'settings') loadSettings();
   if (name === 'stats') loadStats();
+  if (name === 'users') loadUsers();
 }
 
 // ============================================================
@@ -1360,8 +1416,96 @@ function toggleAutoScroll() {
 }
 
 // ============================================================
+// 当前用户 & 用户管理（管理员）
+// ============================================================
+let currentUser = null;
+
+async function initAuth() {
+  try {
+    const data = await api('GET', '/api/check_auth', null);
+    const userEl = document.getElementById('current-user');
+    if (data.authenticated) {
+      currentUser = { username: data.username, role: data.role };
+      const roleText = data.role === 'admin' ? ' <span style="color:#e67e22;">(管理员)</span>' : '';
+      userEl.innerHTML = '&#128100; ' + escHtml(data.username) + roleText;
+      if (data.role === 'admin') {
+        document.getElementById('tab-btn-users').style.display = '';
+      }
+    }
+  } catch (e) { /* 未登录由后端重定向处理 */ }
+}
+
+function showAddUser() {
+  document.getElementById('user-username').value = '';
+  document.getElementById('user-password').value = '';
+  document.getElementById('user-role').value = 'user';
+  openModal('user-modal');
+}
+
+async function saveNewUser() {
+  const username = document.getElementById('user-username').value.trim();
+  const password = document.getElementById('user-password').value;
+  const role = document.getElementById('user-role').value;
+  if (!username || !password) { showAlert('用户名和密码不能为空'); return; }
+  if (password.length < 6) { showAlert('密码长度至少6位'); return; }
+  try {
+    const data = await api('POST', '/api/users', { username, password, role });
+    if (data.status !== 'ok') { showAlert(data.message || '创建失败'); return; }
+    closeModal('user-modal');
+    showAlert(`用户 ${username} 创建成功`);
+    loadUsers();
+  } catch (e) { showAlert('创建失败: ' + e.message); }
+}
+
+async function deleteUser(userId, username) {
+  if (!await showConfirm(`确定删除用户「${username}」？该用户的会话和监控任务将被终止。`)) return;
+  try {
+    const data = await api('DELETE', `/api/users/${userId}`, null);
+    if (data.status !== 'ok') { showAlert(data.message || '删除失败'); return; }
+    showAlert(`用户 ${username} 已删除`);
+    loadUsers();
+  } catch (e) { showAlert('删除失败: ' + e.message); }
+}
+
+async function loadUsers() {
+  const body = document.getElementById('user-list-body');
+  body.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:#b2bec3;">加载中...</td></tr>';
+  try {
+    const users = await api('GET', '/api/users');
+    if (!users.length) {
+      body.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:#b2bec3;">暂无用户</td></tr>';
+      return;
+    }
+    body.innerHTML = users.map(u => {
+      const role = u.role === 'admin'
+        ? '<span style="color:#e67e22;font-weight:500;">管理员</span>'
+        : '<span style="color:#636e72;">普通用户</span>';
+      const online = u.online
+        ? '<span style="color:#27ae60;">在线</span>'
+        : '<span style="color:#b2bec3;">离线</span>';
+      const canDel = currentUser && u.username === currentUser.username;
+      const delBtn = canDel
+        ? '<span class="text-sm">当前账号</span>'
+        : `<button class="btn btn-sm btn-danger" onclick="deleteUser(${u.id}, '${escHtml(u.username)}')">删除</button>`;
+      return `<tr style="border-bottom:1px solid #f0f0f0;">
+        <td style="padding:10px 12px;">${escHtml(u.username)}</td>
+        <td style="padding:10px 12px;">${role}</td>
+        <td style="padding:10px 12px;">${u.accounts} / ${u.rules}</td>
+        <td style="padding:10px 12px;">${u.history}</td>
+        <td style="padding:10px 12px;">${online}</td>
+        <td style="padding:10px 12px;">${escHtml(u.created_at || '')}</td>
+        <td style="padding:10px 12px;">${delBtn}</td>
+      </tr>`;
+    }).join('');
+  } catch (e) {
+    body.innerHTML = `<tr><td colspan="7" style="padding:20px;text-align:center;color:#e74c3c;">加载失败: ${escHtml(e.message)}</td></tr>`;
+  }
+}
+
+// ============================================================
 // 初始化
 // ============================================================
+initAuth();
 loadAccounts();
 connectLogWs();
 loadHistoryAccounts();

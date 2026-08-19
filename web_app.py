@@ -170,17 +170,231 @@ config = ConfigManager()
 # ============================================================
 # 用户认证
 # ============================================================
-def make_session_token(username: str) -> str:
-    raw = f"{username}:{secrets.token_hex(16)}:{datetime.now(SHANGHAI_TZ).timestamp()}"
-    return hashlib.sha256(raw.encode()).hexdigest()
+USERS_DB_PATH = BASE_DIR / "users.db"
 
 
-def verify_session(request: Request) -> bool:
-    token = request.cookies.get("session_token", "")
+# ============================================================
+# 多租户数据层：users / sessions（每用户独立账号/规则/通知/模板）
+# ============================================================
+def init_users_db():
+    USERS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(USERS_DB_PATH))
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            password_salt TEXT NOT NULL,
+            role TEXT NOT NULL DEFAULT 'user',
+            accounts TEXT NOT NULL DEFAULT '[]',
+            webhooks TEXT NOT NULL DEFAULT '[]',
+            cleanup TEXT NOT NULL DEFAULT '{}',
+            rule_templates TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            token TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            FOREIGN KEY(user_id) REFERENCES users(id)
+        )
+    """)
+    conn.commit()
+    conn.close()
+    migrate_legacy_config()
+
+
+def migrate_legacy_config():
+    """首次使用：把历史 config.json 里的管理员/账号/通知迁移到 users 表。
+    若 users 表为空且 config.json 已配置过账号，则创建首个 admin 用户承载这些数据。"""
+    conn = sqlite3.connect(str(USERS_DB_PATH))
+    conn.row_factory = sqlite3.Row
+    try:
+        cnt = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        if cnt > 0:
+            return
+        admin = config.get_admin()
+        accounts = config.get_accounts()
+        if not admin.get("password_hash") and not accounts:
+            return  # 全新安装，走后端 setup 流程
+        username = admin.get("username") or "admin"
+        pwd_hash = admin.get("password_hash") or ""
+        pwd_salt = admin.get("password_salt") or ""
+        if not pwd_hash:
+            # 历史无管理员但有账号：生成一个默认口令 "admin123"
+            salt = secrets.token_hex(16)
+            pwd_hash = hashlib.sha256(("admin123" + salt).encode()).hexdigest()
+            pwd_salt = salt
+        conn.execute(
+            "INSERT INTO users (username, password_hash, password_salt, role, accounts, webhooks, cleanup, rule_templates) "
+            "VALUES (?, ?, ?, 'admin', ?, ?, ?, ?)",
+            (username, pwd_hash, pwd_salt,
+             json.dumps(accounts, ensure_ascii=False),
+             json.dumps(config.get_webhooks(), ensure_ascii=False),
+             json.dumps(config.get_cleanup(), ensure_ascii=False),
+             json.dumps(config.get_rule_templates(), ensure_ascii=False)),
+        )
+        admin_id = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()["id"]
+        # 历史 history 数据归属到新 admin 用户
+        try:
+            hist = sqlite3.connect(str(HISTORY_DB_PATH))
+            hist.execute("UPDATE history SET user_id = ? WHERE user_id = 0", (admin_id,))
+            hist.commit()
+            hist.close()
+        except Exception:
+            pass
+        conn.commit()
+        logger.info(f"[多租户] 已将历史 config.json 迁移到 admin 用户（{username}，含 {len(accounts)} 个账号）")
+    finally:
+        conn.close()
+
+
+def _users_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(str(USERS_DB_PATH))
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def hash_password(password: str, salt: str) -> str:
+    return hashlib.sha256((password + salt).encode()).hexdigest()
+
+
+def create_user(username: str, password: str, role: str = "user"):
+    conn = _users_conn()
+    try:
+        salt = secrets.token_hex(16)
+        conn.execute(
+            "INSERT INTO users (username, password_hash, password_salt, role) VALUES (?, ?, ?, ?)",
+            (username, hash_password(password, salt), salt, role),
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        raise HTTPException(400, "用户名已存在")
+    finally:
+        conn.close()
+
+
+def get_user_by_username(username: str):
+    conn = _users_conn()
+    try:
+        row = conn.execute("SELECT * FROM users WHERE username = ?", (username,)).fetchone()
+        return row
+    finally:
+        conn.close()
+
+
+def get_user_by_id(user_id: int):
+    conn = _users_conn()
+    try:
+        return conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def verify_user(username: str, password: str):
+    row = get_user_by_username(username)
+    if not row:
+        return None
+    if row["password_salt"] and hash_password(password, row["password_salt"]) == row["password_hash"]:
+        return row
+    return None
+
+
+def create_session(user_id: int) -> str:
+    token = secrets.token_hex(32)
+    conn = _users_conn()
+    try:
+        conn.execute("INSERT INTO sessions (token, user_id) VALUES (?, ?)", (token, user_id))
+        conn.commit()
+    finally:
+        conn.close()
+    return token
+
+
+def delete_session(token: str):
+    conn = _users_conn()
+    try:
+        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_user_by_token(token: str):
     if not token:
-        return False
-    stored = config.cfg.get("session_token", "")
-    return token == stored and bool(stored)
+        return None
+    conn = _users_conn()
+    try:
+        row = conn.execute(
+            "SELECT u.* FROM users u JOIN sessions s ON s.user_id = u.id WHERE s.token = ?", (token,)
+        ).fetchone()
+        return row
+    finally:
+        conn.close()
+
+
+def _row_to_dict(row) -> dict:
+    return {k: row[k] for k in row.keys()}
+
+
+def get_user_config(row) -> dict:
+    """把 users 行的业务配置字段解析为 dict"""
+    if row is None:
+        return default_config()
+    return {
+        "accounts": json.loads(row["accounts"] or "[]"),
+        "webhooks": json.loads(row["webhooks"] or "[]"),
+        "cleanup": json.loads(row["cleanup"] or "{}"),
+        "rule_templates": json.loads(row["rule_templates"] or "[]"),
+    }
+
+
+def save_user_config(user_id: int, cfg: dict):
+    conn = _users_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET accounts=?, webhooks=?, cleanup=?, rule_templates=? WHERE id=?",
+            (json.dumps(cfg.get("accounts", []), ensure_ascii=False),
+             json.dumps(cfg.get("webhooks", []), ensure_ascii=False),
+             json.dumps(cfg.get("cleanup", {}), ensure_ascii=False),
+             json.dumps(cfg.get("rule_templates", []), ensure_ascii=False),
+             user_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_user_webhooks(user_id: int) -> list:
+    user = get_user_by_id(user_id)
+    if user is None:
+        return config.get_webhooks()
+    return get_user_config(user)["webhooks"]
+
+
+def make_session_token(username: str) -> str:
+    # 兼容保留：新逻辑使用 create_session
+    user = get_user_by_username(username)
+    if user is None:
+        return ""
+    return create_session(user["id"])
+
+
+def verify_session(request: Request):
+    """返回当前用户行(dict) 或 None"""
+    token = request.cookies.get("session_token", "")
+    row = get_user_by_token(token)
+    return _row_to_dict(row) if row else None
+
+
+def _user_ctx(request: Request):
+    """未登录抛 401；返回 (user_id, 该用户的业务配置 dict)"""
+    user = verify_session(request)
+    if not user:
+        raise HTTPException(401, "未登录")
+    return user["id"], get_user_config(user)
 
 
 # ============================================================
@@ -208,6 +422,7 @@ def init_history_db():
             topic_id TEXT DEFAULT '',
             topic_name TEXT DEFAULT '',
             starred INTEGER DEFAULT 0,
+            user_id INTEGER DEFAULT 0,
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         )
     """)
@@ -224,15 +439,21 @@ def init_history_db():
             conn.execute("ALTER TABLE history ADD COLUMN topic_name TEXT DEFAULT ''")
         if "starred" not in cols:
             conn.execute("ALTER TABLE history ADD COLUMN starred INTEGER DEFAULT 0")
+        if "user_id" not in cols:
+            conn.execute("ALTER TABLE history ADD COLUMN user_id INTEGER DEFAULT 0")
     except Exception:
         pass
-    # 去重唯一索引：(account_idx, msg_id)，保证同账号同消息不重复入库
+    # 去重唯一索引：(user_id, account_idx, msg_id)（多租户下按用户隔离去重）
     try:
-        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_history_dedup ON history (account_idx, msg_id)")
+        conn.execute("DROP INDEX IF EXISTS idx_history_dedup")
+    except Exception:
+        pass
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_history_dedup ON history (user_id, account_idx, msg_id)")
     except Exception:
         # 旧库已存在重复数据时降级为普通索引，去重交给应用层检查
         try:
-            conn.execute("CREATE INDEX IF NOT EXISTS idx_history_dedup ON history (account_idx, msg_id)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_history_dedup ON history (user_id, account_idx, msg_id)")
         except Exception:
             pass
     
@@ -241,6 +462,7 @@ def init_history_db():
         CREATE TABLE IF NOT EXISTS push_logs (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             ts TEXT NOT NULL,
+            user_id INTEGER DEFAULT 0,
             account_name TEXT NOT NULL,
             account_idx INTEGER NOT NULL,
             channel_type TEXT NOT NULL,
@@ -251,6 +473,13 @@ def init_history_db():
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         )
     """)
+    # 迁移：旧库补充 user_id 字段
+    try:
+        pcols = [r[1] for r in conn.execute("PRAGMA table_info(push_logs)").fetchall()]
+        if "user_id" not in pcols:
+            conn.execute("ALTER TABLE push_logs ADD COLUMN user_id INTEGER DEFAULT 0")
+    except Exception:
+        pass
     
     # FTS5 全文索引（trigram 分词，支持中文；失败时自动跳过，不影响现有 LIKE 搜索）
     try:
@@ -284,15 +513,15 @@ def init_history_db():
     conn.close()
 
 
-def save_history(account_name: str, account_idx: int, chat_title: str, chat_id, sender_name: str, sender_id, text: str, has_media: bool, media_type: str, rule_remark: str, media_path: str = "", msg_id=None, topic_id="", topic_name=""):
+def save_history(user_id: int, account_name: str, account_idx: int, chat_title: str, chat_id, sender_name: str, sender_id, text: str, has_media: bool, media_type: str, rule_remark: str, media_path: str = "", msg_id=None, topic_id="", topic_name=""):
     """保存历史消息，返回 True 表示新插入，False 表示重复已忽略"""
     try:
         conn = sqlite3.connect(str(HISTORY_DB_PATH))
         cur = conn.execute(
-            "INSERT OR IGNORE INTO history (ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, media_path, rule_remark, msg_id, topic_id, topic_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO history (ts, user_id, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, media_path, rule_remark, msg_id, topic_id, topic_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S"),
-                str(account_name), int(account_idx),
+                int(user_id), str(account_name), int(account_idx),
                 str(chat_title or ""), str(chat_id or ""),
                 str(sender_name or ""), str(sender_id or ""),
                 str(text or ""), 1 if has_media else 0,
@@ -308,15 +537,15 @@ def save_history(account_name: str, account_idx: int, chat_title: str, chat_id, 
         return True
 
 
-def is_history_duplicate(account_idx: int, msg_id) -> bool:
-    """检查 (account_idx, msg_id) 是否已入库（用于消息去重，避免重启/重连重复推送）"""
+def is_history_duplicate(user_id: int, account_idx: int, msg_id) -> bool:
+    """检查 (user_id, account_idx, msg_id) 是否已入库（用于去重，避免重启/重连重复推送）"""
     if msg_id is None:
         return False
     try:
         conn = sqlite3.connect(str(HISTORY_DB_PATH))
         row = conn.execute(
-            "SELECT 1 FROM history WHERE account_idx = ? AND msg_id = ? LIMIT 1",
-            (int(account_idx), str(msg_id)),
+            "SELECT 1 FROM history WHERE user_id = ? AND account_idx = ? AND msg_id = ? LIMIT 1",
+            (int(user_id), int(account_idx), str(msg_id)),
         ).fetchone()
         conn.close()
         return row is not None
@@ -326,6 +555,7 @@ def is_history_duplicate(account_idx: int, msg_id) -> bool:
 
 # 启动时初始化
 init_history_db()
+init_users_db()
 
 
 # ============================================================
@@ -654,7 +884,8 @@ def _rate_allowed(channel_key: str) -> bool:
 
 
 async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optional[dict] = None, 
-                              account_name: str = "", account_idx: int = -1, rule_remark: str = ""):
+                              account_name: str = "", account_idx: int = -1, rule_remark: str = "",
+                              user_id: int = 0):
     """发送 webhook 推送并记录推送日志"""
     now_ts = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
     
@@ -835,8 +1066,8 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
         try:
             conn = sqlite3.connect(str(HISTORY_DB_PATH))
             conn.execute(
-                "INSERT INTO push_logs (ts, account_name, account_idx, channel_type, channel_index, status, error_message, retry_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (now_ts, account_name, account_idx, channel_type, idx, push_status, error_msg, retry_count)
+                "INSERT INTO push_logs (ts, user_id, account_name, account_idx, channel_type, channel_index, status, error_message, retry_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (now_ts, int(user_id), account_name, account_idx, channel_type, idx, push_status, error_msg, retry_count)
             )
             conn.commit()
             conn.close()
@@ -1053,9 +1284,10 @@ def format_alert(event, rule_remark, chat_title, sender_name, topic_name=""):
 # 监控引擎（异步版，适配 FastAPI）
 # ============================================================
 class AsyncMonitor:
-    def __init__(self, account: dict, account_idx: int):
+    def __init__(self, account: dict, account_idx: int, user_id: int = 0):
         self.account = account
         self.account_idx = account_idx
+        self.user_id = user_id
         self.client: Optional[TelegramClient] = None
         self.running = False
         self._stop_event = asyncio.Event()
@@ -1106,7 +1338,7 @@ class AsyncMonitor:
         self.client = self.build_client()
         account_name = self.account.get("remark", "未知")
         rules = self.account.get("rules", [])
-        webhooks = config.get_webhooks()
+        webhooks = get_user_webhooks(self.user_id)
         self._stop_event.clear()
 
         try:
@@ -1163,7 +1395,7 @@ class AsyncMonitor:
                         continue
                     matched = True
                     # P0-1.1 消息去重：同账号同消息已处理过则跳过转发/推送，避免重启/重连重复
-                    if is_history_duplicate(self.account_idx, msg.id):
+                    if is_history_duplicate(self.user_id, self.account_idx, msg.id):
                         logger.info(f"[{account_name}] 重复消息已去重: chat={chat_title} msg_id={msg.id}")
                         continue
                     logger.info(f"[{account_name}] 收到消息: chat={chat_title}({chat_id}) sender={sender_name}({sender_id}) text={text[:50]}")
@@ -1244,7 +1476,7 @@ class AsyncMonitor:
                                 media_data = {"bytes": file_bytes_val, "filename": f"telegram{ext}", "media_type": media_type, "sticker_mime": sticker_mime}
                         except Exception as e:
                             logger.warning(f"[{account_name}] 下载媒体失败: {e}")
-                    save_history(account_name, self.account_idx, chat_title, chat_id,
+                    save_history(self.user_id, account_name, self.account_idx, chat_title, chat_id,
                                  sender_name, sender_id, text, has_media, media_type, remark, media_path, msg.id, topic_id, topic_name)
                     # Webhook：规则级优先，有规则级则跳过全局
                     wh_list = []
@@ -1264,7 +1496,7 @@ class AsyncMonitor:
                             if u:
                                 wh_list.append(gw)
                     if wh_list:
-                        asyncio.ensure_future(send_webhook_alerts(alert, wh_list, media_data, account_name, self.account_idx, remark))
+                        asyncio.ensure_future(send_webhook_alerts(alert, wh_list, media_data, account_name, self.account_idx, remark, self.user_id))
             except Exception as e:
                 logger.error(f"[{account_name}] 处理消息异常: {e}")
 
@@ -1293,76 +1525,97 @@ class AsyncMonitor:
 # ============================================================
 class MonitorManager:
     def __init__(self):
-        self.monitors: dict[int, AsyncMonitor] = {}
-        self.tasks: dict[int, asyncio.Task] = {}
+        self.monitors: dict[tuple, AsyncMonitor] = {}
+        self.tasks: dict[tuple, asyncio.Task] = {}
 
-    async def start_monitor(self, account_idx: int):
-        if account_idx in self.monitors and self.monitors[account_idx].running:
+    @staticmethod
+    def _key(user_id: int, account_idx: int) -> tuple:
+        return (user_id, account_idx)
+
+    def user_accounts(self, user_id: int) -> list:
+        user = get_user_by_id(user_id)
+        return get_user_config(user)["accounts"]
+
+    async def start_monitor(self, user_id: int, account_idx: int):
+        key = self._key(user_id, account_idx)
+        if key in self.monitors and self.monitors[key].running:
             return {"status": "already_running"}
-        accounts = config.get_accounts()
+        accounts = self.user_accounts(user_id)
         if account_idx < 0 or account_idx >= len(accounts):
             raise HTTPException(404, "账号不存在")
         # 先检查 session 是否有效
         chk = check_session(accounts[account_idx])
         if not chk["valid"]:
             return {"status": "error", "message": "session 未登录，请先点击「登录」"}
-        monitor = AsyncMonitor(accounts[account_idx], account_idx)
-        self.monitors[account_idx] = monitor
-        self.tasks[account_idx] = asyncio.create_task(monitor.start())
-        logger.info(f"[{accounts[account_idx].get('remark', '')}] 监控任务已创建")
+        monitor = AsyncMonitor(accounts[account_idx], account_idx, user_id=user_id)
+        self.monitors[key] = monitor
+        self.tasks[key] = asyncio.create_task(monitor.start())
+        logger.info(f"[{accounts[account_idx].get('remark', '')}] 监控任务已创建 (user={user_id})")
         return {"status": "started"}
 
-    async def stop_monitor(self, account_idx: int):
-        if account_idx in self.monitors:
-            await self.monitors[account_idx].stop()
-            if account_idx in self.tasks:
-                self.tasks[account_idx].cancel()
-                del self.tasks[account_idx]
-            del self.monitors[account_idx]
+    async def stop_monitor(self, user_id: int, account_idx: int):
+        key = self._key(user_id, account_idx)
+        if key in self.monitors:
+            await self.monitors[key].stop()
+            if key in self.tasks:
+                self.tasks[key].cancel()
+                del self.tasks[key]
+            del self.monitors[key]
             return {"status": "stopped"}
         return {"status": "not_running"}
 
-    def is_running(self, account_idx: int) -> bool:
-        m = self.monitors.get(account_idx)
+    def is_running(self, user_id: int, account_idx: int) -> bool:
+        key = self._key(user_id, account_idx)
+        m = self.monitors.get(key)
         if m is None:
             return False
         if not m.running:
             # 可能还在连接中，检查 task 是否活着
-            t = self.tasks.get(account_idx)
+            t = self.tasks.get(key)
             if t is not None and not t.done():
                 return False  # 还在连接中，不删除
             # task 已结束，清理
-            if account_idx in self.tasks:
-                del self.tasks[account_idx]
-            if account_idx in self.monitors:
-                del self.monitors[account_idx]
+            del self.tasks[key]
+            del self.monitors[key]
             return False
         # 检查 task 是否还活着
-        t = self.tasks.get(account_idx)
+        t = self.tasks.get(key)
         if t is None or t.done():
             m.running = False
-            if account_idx in self.tasks:
-                del self.tasks[account_idx]
-            if account_idx in self.monitors:
-                del self.monitors[account_idx]
+            del self.tasks[key]
+            del self.monitors[key]
             return False
         return True
 
-    def get_status(self, account_idx: int) -> dict:
+    def get_status(self, user_id: int, account_idx: int) -> dict:
         return {
             "idx": account_idx,
-            "running": self.is_running(account_idx),
+            "running": self.is_running(user_id, account_idx),
         }
 
-    def all_status(self) -> list[dict]:
+    def all_status(self, user_id: int) -> list[dict]:
         result = []
-        accounts = config.get_accounts()
+        accounts = self.user_accounts(user_id)
         for i in range(len(accounts)):
             result.append({
                 "idx": i,
-                "running": self.is_running(i),
+                "running": self.is_running(user_id, i),
             })
         return result
+
+    async def stop_all(self, user_id: int):
+        """停止指定用户的所有监控任务（管理员删除用户时调用）"""
+        keys = [k for k in list(self.monitors.keys()) if k[0] == user_id]
+        for key in keys:
+            try:
+                await self.monitors[key].stop()
+            except Exception:
+                pass
+            if key in self.tasks:
+                self.tasks[key].cancel()
+                del self.tasks[key]
+            if key in self.monitors:
+                del self.monitors[key]
 
 
 monitor_mgr = MonitorManager()
@@ -1380,15 +1633,23 @@ app = FastAPI(title="Telegram 监控管理后台", version="2.0.0")
 async def login_page(request: Request):
     if verify_session(request):
         return RedirectResponse(url="/")
-    if config.is_admin_configured():
-        html_path = BASE_DIR / "templates" / "login.html"
-        if html_path.exists():
-            return HTMLResponse(html_path.read_text(encoding="utf-8"))
-    else:
+    if user_count() == 0:
         html_path = BASE_DIR / "templates" / "setup.html"
         if html_path.exists():
             return HTMLResponse(html_path.read_text(encoding="utf-8"))
+    else:
+        html_path = BASE_DIR / "templates" / "login.html"
+        if html_path.exists():
+            return HTMLResponse(html_path.read_text(encoding="utf-8"))
     return HTMLResponse("<h1>请先创建 templates/login.html</h1>")
+
+
+def user_count() -> int:
+    conn = _users_conn()
+    try:
+        return conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+    finally:
+        conn.close()
 
 
 @app.post("/api/login")
@@ -1396,19 +1657,18 @@ async def login(request: Request):
     data = await request.json()
     username = data.get("username", "").strip()
     password = data.get("password", "").strip()
-    if not config.is_admin_configured():
-        # 首次设置密码
-        config.set_admin_password(username, password)
-        token = make_session_token(username)
-        config.cfg["session_token"] = token
-        config.save()
-        return {"status": "ok", "token": token}
-    if config.verify_admin(username, password):
-        token = make_session_token(username)
-        config.cfg["session_token"] = token
-        config.save()
-        return {"status": "ok", "token": token}
-    return {"status": "error", "message": "用户名或密码错误"}
+    if user_count() == 0:
+        # 首次设置第一个账号（自动成为管理员）
+        if not username or not password:
+            return {"status": "error", "message": "用户名和密码不能为空"}
+        if len(password) < 6:
+            return {"status": "error", "message": "密码长度至少6位"}
+        create_user(username, password, role="admin")
+    user = verify_user(username, password)
+    if user is None:
+        return {"status": "error", "message": "用户名或密码错误"}
+    token = create_session(user["id"])
+    return {"status": "ok", "token": token, "username": user["username"], "role": user["role"]}
 
 
 @app.post("/api/setup")
@@ -1420,18 +1680,142 @@ async def setup(request: Request):
         return {"status": "error", "message": "用户名和密码不能为空"}
     if len(password) < 6:
         return {"status": "error", "message": "密码长度至少6位"}
-    config.set_admin_password(username, password)
-    token = make_session_token(username)
-    config.cfg["session_token"] = token
-    config.save()
-    return {"status": "ok", "message": "管理员账号设置成功，请重新登录"}
+    if user_count() == 0:
+        create_user(username, password, role="admin")
+    else:
+        return {"status": "error", "message": "系统已初始化"}
+    token = create_session(get_user_by_username(username)["id"])
+    return {"status": "ok", "token": token, "message": "管理员账号设置成功"}
 
 
 @app.post("/api/logout")
 async def logout(request: Request):
-    config.cfg["session_token"] = ""
-    config.save()
+    token = request.cookies.get("session_token", "")
+    if token:
+        delete_session(token)
     return {"status": "ok"}
+
+
+# ============================================================
+# API - 用户注册 / 管理员用户管理
+# ============================================================
+@app.post("/api/register")
+async def register(request: Request):
+    if verify_session(request):
+        return {"status": "error", "message": "请先退出当前账号"}
+    data = await request.json()
+    username = data.get("username", "").strip()
+    password = data.get("password", "").strip()
+    if not username or not password:
+        return {"status": "error", "message": "用户名和密码不能为空"}
+    if len(username) < 2:
+        return {"status": "error", "message": "用户名至少2个字符"}
+    if len(password) < 6:
+        return {"status": "error", "message": "密码长度至少6位"}
+    try:
+        create_user(username, password, role="user")
+    except HTTPException as e:
+        return {"status": "error", "message": e.detail}
+    logger.info(f"[多租户] 新用户注册: {username}")
+    token = create_session(get_user_by_username(username)["id"])
+    return {"status": "ok", "token": token, "username": username, "role": "user"}
+
+
+def _require_admin(request: Request) -> dict:
+    """返回当前用户 dict；非管理员抛 403"""
+    user = verify_session(request)
+    if not user:
+        raise HTTPException(401, "未登录")
+    if user["role"] != "admin":
+        raise HTTPException(403, "无管理员权限")
+    return user
+
+
+def _count_user_resources(user_id: int) -> dict:
+    """统计用户账号数/规则数/历史消息数"""
+    cfg = get_user_config(get_user_by_id(user_id))
+    account_cnt = len(cfg["accounts"])
+    rule_cnt = sum(len(a.get("rules", [])) for a in cfg["accounts"])
+    hist_cnt = 0
+    try:
+        hist = sqlite3.connect(str(HISTORY_DB_PATH))
+        row = hist.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (int(user_id),)).fetchone()
+        hist_cnt = row[0] if row else 0
+        hist.close()
+    except Exception:
+        pass
+    return {"accounts": account_cnt, "rules": rule_cnt, "history": hist_cnt}
+
+
+@app.get("/api/users")
+async def list_users(request: Request):
+    _require_admin(request)
+    conn = _users_conn()
+    try:
+        rows = conn.execute(
+            "SELECT id, username, role, created_at FROM users ORDER BY id"
+        ).fetchall()
+        sessions = dict(conn.execute(
+            "SELECT user_id, COUNT(*) FROM sessions GROUP BY user_id"
+        ).fetchall())
+    finally:
+        conn.close()
+    result = []
+    for row in rows:
+        counters = _count_user_resources(row["id"])
+        result.append({
+            "id": row["id"],
+            "username": row["username"],
+            "role": row["role"],
+            "created_at": row["created_at"],
+            "online": sessions.get(row["id"], 0) > 0,
+            **counters,
+        })
+    return result
+
+
+@app.post("/api/users")
+async def create_admin_user(request: Request, data: dict):
+    _require_admin(request)
+    username = data.get("username", "").strip()
+    password = data.get("password", "").strip()
+    role = data.get("role", "user")
+    if role not in ("admin", "user"):
+        role = "user"
+    if not username or not password:
+        return {"status": "error", "message": "用户名和密码不能为空"}
+    if len(username) < 2:
+        return {"status": "error", "message": "用户名至少2个字符"}
+    if len(password) < 6:
+        return {"status": "error", "message": "密码长度至少6位"}
+    try:
+        create_user(username, password, role=role)
+    except HTTPException as e:
+        return {"status": "error", "message": e.detail}
+    logger.info(f"[多租户] 管理员创建用户: {username} (role={role})")
+    return {"status": "ok", "message": f"用户 {username} 创建成功"}
+
+
+@app.delete("/api/users/{user_id}")
+async def delete_admin_user(user_id: int, request: Request):
+    admin = _require_admin(request)
+    target = get_user_by_id(user_id)
+    if target is None:
+        return {"status": "error", "message": "用户不存在"}
+    if target["id"] == admin["id"]:
+        return {"status": "error", "message": "不能删除当前账号"}
+    conn = _users_conn()
+    try:
+        # 清理会话与用户
+        conn.execute("DELETE FROM sessions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    # 停止该用户所有监控任务
+    await monitor_mgr.stop_all(user_id)
+    logger.info(f"[多租户] 管理员删除用户: {target['username']} (id={user_id})")
+    return {"status": "ok", "message": f"用户 {target['username']} 已删除"}
 
 
 # 全局鉴权中间件：未登录跳转 /login
@@ -1442,9 +1826,10 @@ from typing import Callable
 security = APIKeyCookie(name="session_token", auto_error=False)
 
 async def require_auth(request: Request, token: str = Depends(security)) -> bool:
-    stored = config.cfg.get("session_token", "")
-    if not stored or not token or token != stored:
+    user = get_user_by_token(token)
+    if user is None:
         return False
+    request.state.current_user = _row_to_dict(user)
     return True
 
 
@@ -1452,9 +1837,10 @@ async def require_auth(request: Request, token: str = Depends(security)) -> bool
 # API - 账号管理
 # ============================================================
 @app.get("/api/accounts")
-async def list_accounts():
-    accounts = config.get_accounts()
-    statuses = monitor_mgr.all_status()
+async def list_accounts(request: Request):
+    user_id, cfg = _user_ctx(request)
+    accounts = cfg["accounts"]
+    statuses = monitor_mgr.all_status(user_id)
     status_map = {s["idx"]: s["running"] for s in statuses}
     result = []
     for i, acc in enumerate(accounts):
@@ -1475,7 +1861,8 @@ async def list_accounts():
 
 
 @app.post("/api/accounts")
-def add_account(data: dict):
+def add_account(request: Request, data: dict):
+    user_id, cfg = _user_ctx(request)
     account = {
         "remark": data.get("remark", "未命名"),
         "phone": data.get("phone", ""),
@@ -1484,14 +1871,16 @@ def add_account(data: dict):
         "proxy": data.get("proxy", {"scheme": "", "host": "", "port": 0, "username": "", "password": ""}),
         "rules": [],
     }
-    config.add_account(account)
-    logger.info(f"已添加账号: {account['remark']} ({account['phone']})")
-    return {"status": "ok", "idx": len(config.get_accounts()) - 1}
+    cfg["accounts"].append(account)
+    save_user_config(user_id, cfg)
+    logger.info(f"[user={user_id}] 已添加账号: {account['remark']} ({account['phone']})")
+    return {"status": "ok", "idx": len(cfg["accounts"]) - 1}
 
 
 @app.put("/api/accounts/{idx}")
-def update_account(idx: int, data: dict):
-    accounts = config.get_accounts()
+def update_account(idx: int, request: Request, data: dict):
+    user_id, cfg = _user_ctx(request)
+    accounts = cfg["accounts"]
     if idx < 0 or idx >= len(accounts):
         raise HTTPException(404, "账号不存在")
     acc = accounts[idx]
@@ -1505,20 +1894,22 @@ def update_account(idx: int, data: dict):
         acc["api_hash"] = data["api_hash"]
     if "proxy" in data:
         acc["proxy"] = data["proxy"]
-    config.update_account(idx, acc)
-    logger.info(f"已更新账号: {acc.get('remark', '')}")
+    save_user_config(user_id, cfg)
+    logger.info(f"[user={user_id}] 已更新账号: {acc.get('remark', '')}")
     return {"status": "ok"}
 
 
 @app.delete("/api/accounts/{idx}")
-def delete_account(idx: int):
-    accounts = config.get_accounts()
+def delete_account(idx: int, request: Request):
+    user_id, cfg = _user_ctx(request)
+    accounts = cfg["accounts"]
     if idx < 0 or idx >= len(accounts):
         raise HTTPException(404, "账号不存在")
     # 先停止监控
-    asyncio.create_task(monitor_mgr.stop_monitor(idx))
-    config.delete_account(idx)
-    logger.info(f"已删除账号: {accounts[idx].get('remark', '')}")
+    asyncio.create_task(monitor_mgr.stop_monitor(user_id, idx))
+    del accounts[idx]
+    save_user_config(user_id, cfg)
+    logger.info(f"[user={user_id}] 已删除账号: {accounts[idx].get('remark', '') if idx < len(accounts) else ''}")
     return {"status": "ok"}
 
 
@@ -1542,8 +1933,10 @@ _login_states: dict = {}  # idx -> { client, done_event, code_event, code, resul
 
 
 @app.post("/api/accounts/{idx}/login")
-async def login_start(idx: int):
-    accounts = config.get_accounts()
+async def login_start(idx: int, request: Request):
+    user_id, cfg = _user_ctx(request)
+    key = (user_id, idx)
+    accounts = cfg["accounts"]
     if idx < 0 or idx >= len(accounts):
         raise HTTPException(404, "账号不存在")
     acc = accounts[idx]
@@ -1556,13 +1949,13 @@ async def login_start(idx: int):
         return {"status": "ok", "message": f"session 有效，已登录为 {chk.get('display_name', '')}"}
 
     # 如果之前有登录状态，清理
-    if idx in _login_states:
-        old = _login_states[idx]
+    if key in _login_states:
+        old = _login_states[key]
         try:
             await old.get("client", None).disconnect()
         except Exception:
             pass
-        del _login_states[idx]
+        del _login_states[key]
 
     state = {
         "client": None,
@@ -1572,7 +1965,7 @@ async def login_start(idx: int):
         "result": None,
         "error": None,
     }
-    _login_states[idx] = state
+    _login_states[key] = state
 
     async def do_login():
         proxy_cfg = acc.get("proxy") or {}
@@ -1637,19 +2030,21 @@ async def login_start(idx: int):
     if state.get("result") == "NEED_PASSWORD":
         return {"status": "need_password", "message": "需要两步验证密码"}
     if state.get("result"):
-        del _login_states[idx]
+        del _login_states[key]
         return {"status": "ok", "message": state["result"]}
     if state.get("error"):
         err = state["error"]
-        del _login_states[idx]
+        del _login_states[key]
         return {"status": "error", "message": err}
 
     return {"status": "need_code", "message": "请输入验证码"}
 
 
 @app.post("/api/accounts/{idx}/login/code")
-async def login_code(idx: int, data: dict):
-    state = _login_states.get(idx)
+async def login_code(idx: int, request: Request, data: dict):
+    user_id, _ = _user_ctx(request)
+    key = (user_id, idx)
+    state = _login_states.get(key)
     if not state:
         raise HTTPException(400, "没有进行中的登录，请先点击登录")
     code = data.get("code", "").strip()
@@ -1667,20 +2062,22 @@ async def login_code(idx: int, data: dict):
     if state.get("result") == "NEED_PASSWORD":
         return {"status": "need_password", "message": "需要两步验证密码"}
     if state.get("result"):
-        del _login_states[idx]
+        del _login_states[key]
         return {"status": "ok", "message": state["result"]}
     if state.get("error"):
         err = state["error"]
-        del _login_states[idx]
+        del _login_states[key]
         return {"status": "error", "message": err}
 
-    del _login_states[idx]
+    del _login_states[key]
     return {"status": "error", "message": "登录失败，请重试"}
 
 
 @app.post("/api/accounts/{idx}/login/password")
-async def login_password(idx: int, data: dict):
-    state = _login_states.get(idx)
+async def login_password(idx: int, request: Request, data: dict):
+    user_id, _ = _user_ctx(request)
+    key = (user_id, idx)
+    state = _login_states.get(key)
     if not state:
         raise HTTPException(400, "没有进行中的登录，请先点击登录")
     password = data.get("password", "").strip()
@@ -1689,16 +2086,16 @@ async def login_password(idx: int, data: dict):
 
     client = state.get("client")
     if not client:
-        del _login_states[idx]
+        del _login_states[key]
         raise HTTPException(400, "登录会话已过期，请重新登录")
 
     try:
         await client.sign_in(password=password)
         me = await client.get_me()
         msg = f"登录成功: {get_display_name(me)} (id={me.id})"
-        logger.info(f"[{config.get_accounts()[idx].get('remark', '')}] {msg}")
+        logger.info(f"[user={user_id} acc={idx}] {msg}")
         await client.disconnect()
-        del _login_states[idx]
+        del _login_states[key]
         return {"status": "ok", "message": msg}
     except Exception as e:
         return {"status": "error", "message": f"密码错误: {e}"}
@@ -1708,8 +2105,9 @@ async def login_password(idx: int, data: dict):
 # API - 规则管理
 # ============================================================
 @app.get("/api/accounts/{idx}/rules")
-def list_rules(idx: int):
-    accounts = config.get_accounts()
+def list_rules(idx: int, request: Request):
+    _, cfg = _user_ctx(request)
+    accounts = cfg["accounts"]
     if idx < 0 or idx >= len(accounts):
         raise HTTPException(404, "账号不存在")
     rules = accounts[idx].get("rules", [])
@@ -1720,8 +2118,9 @@ def list_rules(idx: int):
 
 
 @app.post("/api/accounts/{idx}/rules")
-def add_rule(idx: int, data: dict):
-    accounts = config.get_accounts()
+def add_rule(idx: int, request: Request, data: dict):
+    user_id, cfg = _user_ctx(request)
+    accounts = cfg["accounts"]
     if idx < 0 or idx >= len(accounts):
         raise HTTPException(404, "账号不存在")
     rule = {
@@ -1740,14 +2139,15 @@ def add_rule(idx: int, data: dict):
         "webhook_chat_id": data.get("webhook_chat_id", ""),
     }
     accounts[idx].setdefault("rules", []).append(rule)
-    config.update_account(idx, accounts[idx])
-    logger.info(f"已添加规则: {rule['remark']}")
+    save_user_config(user_id, cfg)
+    logger.info(f"[user={user_id}] 已添加规则: {rule['remark']}")
     return {"status": "ok"}
 
 
 @app.put("/api/accounts/{idx}/rules/{ridx}")
-def update_rule(idx: int, ridx: int, data: dict):
-    accounts = config.get_accounts()
+def update_rule(idx: int, ridx: int, request: Request, data: dict):
+    user_id, cfg = _user_ctx(request)
+    accounts = cfg["accounts"]
     if idx < 0 or idx >= len(accounts):
         raise HTTPException(404, "账号不存在")
     rules = accounts[idx].get("rules", [])
@@ -1761,14 +2161,15 @@ def update_rule(idx: int, ridx: int, data: dict):
             rule[key] = data[key]
     rules[ridx] = rule
     accounts[idx]["rules"] = rules
-    config.update_account(idx, accounts[idx])
-    logger.info(f"已更新规则: {rule.get('remark', '')}")
+    save_user_config(user_id, cfg)
+    logger.info(f"[user={user_id}] 已更新规则: {rule.get('remark', '')}")
     return {"status": "ok"}
 
 
 @app.delete("/api/accounts/{idx}/rules/{ridx}")
-def delete_rule(idx: int, ridx: int):
-    accounts = config.get_accounts()
+def delete_rule(idx: int, ridx: int, request: Request):
+    user_id, cfg = _user_ctx(request)
+    accounts = cfg["accounts"]
     if idx < 0 or idx >= len(accounts):
         raise HTTPException(404, "账号不存在")
     rules = accounts[idx].get("rules", [])
@@ -1776,8 +2177,8 @@ def delete_rule(idx: int, ridx: int):
         raise HTTPException(404, "规则不存在")
     del rules[ridx]
     accounts[idx]["rules"] = rules
-    config.update_account(idx, accounts[idx])
-    logger.info(f"已删除规则 #{ridx}")
+    save_user_config(user_id, cfg)
+    logger.info(f"[user={user_id}] 已删除规则 #{ridx}")
     return {"status": "ok"}
 
 
@@ -1785,34 +2186,37 @@ def delete_rule(idx: int, ridx: int):
 # API - 规则模板（常用规则一键套用）
 # ============================================================
 @app.get("/api/rule-templates")
-def list_rule_templates():
-    return config.get_rule_templates()
+def list_rule_templates(request: Request):
+    _, cfg = _user_ctx(request)
+    return cfg["rule_templates"]
 
 
 @app.post("/api/rule-templates")
-def save_rule_template(data: dict):
+def save_rule_template(request: Request, data: dict):
+    user_id, cfg = _user_ctx(request)
     name = str(data.get("name", "")).strip()
     if not name:
         raise HTTPException(400, "模板名称不能为空")
     tpl = {k: v for k, v in data.items() if k != "name"}
     tpl["name"] = name
-    templates = config.get_rule_templates()
+    templates = cfg["rule_templates"]
     for i, t in enumerate(templates):
         if t.get("name") == name:
             templates[i] = tpl
             break
     else:
         templates.append(tpl)
-    config.set_rule_templates(templates)
-    logger.info(f"规则模板已保存: {name}")
+    save_user_config(user_id, cfg)
+    logger.info(f"[user={user_id}] 规则模板已保存: {name}")
     return {"status": "ok"}
 
 
 @app.delete("/api/rule-templates/{name}")
-def delete_rule_template(name: str):
-    templates = config.get_rule_templates()
-    config.set_rule_templates([t for t in templates if t.get("name") != name])
-    logger.info(f"规则模板已删除: {name}")
+def delete_rule_template(name: str, request: Request):
+    user_id, cfg = _user_ctx(request)
+    cfg["rule_templates"] = [t for t in cfg["rule_templates"] if t.get("name") != name]
+    save_user_config(user_id, cfg)
+    logger.info(f"[user={user_id}] 规则模板已删除: {name}")
     return {"status": "ok"}
 
 
@@ -1820,57 +2224,76 @@ def delete_rule_template(name: str):
 # API - 监控控制
 # ============================================================
 @app.post("/api/accounts/{idx}/start")
-async def start_monitor(idx: int):
-    return await monitor_mgr.start_monitor(idx)
+async def start_monitor(idx: int, request: Request):
+    user_id, _ = _user_ctx(request)
+    return await monitor_mgr.start_monitor(user_id, idx)
 
 
 @app.post("/api/accounts/{idx}/stop")
-async def stop_monitor(idx: int):
-    return await monitor_mgr.stop_monitor(idx)
+async def stop_monitor(idx: int, request: Request):
+    user_id, _ = _user_ctx(request)
+    return await monitor_mgr.stop_monitor(user_id, idx)
 
 
 @app.get("/api/accounts/{idx}/status")
-def get_status(idx: int):
-    return monitor_mgr.get_status(idx)
+def get_status(idx: int, request: Request):
+    user_id, _ = _user_ctx(request)
+    return monitor_mgr.get_status(user_id, idx)
 
 
 # ============================================================
 # API - 全局设置
 # ============================================================
 @app.get("/api/settings")
-def get_settings():
+def get_settings(request: Request):
+    _, cfg = _user_ctx(request)
     return {
-        "webhooks": config.get_webhooks(),
-        "cleanup": config.get_cleanup(),
+        "webhooks": cfg["webhooks"],
+        "cleanup": cfg["cleanup"],
     }
 
 
 @app.put("/api/settings")
-def update_settings(data: dict):
+def update_settings(request: Request, data: dict):
+    user_id, cfg = _user_ctx(request)
     if "webhooks" in data:
-        config.set_webhooks(data["webhooks"])
+        cfg["webhooks"] = data["webhooks"]
     if "cleanup" in data:
-        config.set_cleanup(data["cleanup"])
-    logger.info("已更新全局设置")
+        cfg["cleanup"] = data["cleanup"]
+    save_user_config(user_id, cfg)
+    logger.info(f"[user={user_id}] 已更新设置")
     return {"status": "ok"}
 
 
 @app.post("/api/cleanup")
-def run_cleanup_now():
-    """立即执行历史消息清理（清理前自动备份）"""
-    cleanup_history()
-    return {"status": "ok"}
+def run_cleanup_now(request: Request):
+    """立即执行历史消息清理（仅当前用户数据，清理前自动备份）"""
+    user_id, _ = _user_ctx(request)
+    backup_database()
+    cutoff = (datetime.now(SHANGHAI_TZ) - timedelta(days=30)).strftime("%Y-%m-%d %H:%M:%S")
+    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    try:
+        cur = conn.execute("DELETE FROM history WHERE user_id = ? AND ts < ?", (user_id, cutoff))
+        deleted = cur.rowcount
+        conn.commit()
+    except Exception:
+        deleted = 0
+    finally:
+        conn.close()
+    logger.info(f"[user={user_id}] 已清理过期历史 {deleted} 条")
+    return {"status": "ok", "deleted": deleted}
 
 
 # ============================================================
 # API - 历史消息
 # ============================================================
 @app.get("/api/history")
-def get_history(account_idx: int = -1, page: int = 1, page_size: int = 20,
+def get_history(request: Request, account_idx: int = -1, page: int = 1, page_size: int = 20,
                 date_from: str = "", date_to: str = "", keyword: str = "", star_only: int = 0):
+    user_id, _ = _user_ctx(request)
     conn = sqlite3.connect(str(HISTORY_DB_PATH))
-    conditions = []
-    params = []
+    conditions = ["user_id = ?"]
+    params = [user_id]
     if account_idx >= 0:
         conditions.append("account_idx = ?")
         params.append(account_idx)
@@ -1930,10 +2353,11 @@ def get_history(account_idx: int = -1, page: int = 1, page_size: int = 20,
 # API - 批量导出历史消息（CSV，UTF-8 BOM 便于 Excel 打开）
 # ============================================================
 @app.get("/api/history/export")
-def export_history(account_idx: int = -1, date_from: str = "", date_to: str = "", keyword: str = ""):
+def export_history(request: Request, account_idx: int = -1, date_from: str = "", date_to: str = "", keyword: str = ""):
+    user_id, _ = _user_ctx(request)
     conn = sqlite3.connect(str(HISTORY_DB_PATH))
-    conditions = []
-    params = []
+    conditions = ["user_id = ?"]
+    params = [user_id]
     if account_idx >= 0:
         conditions.append("account_idx = ?")
         params.append(account_idx)
@@ -1970,10 +2394,11 @@ def export_history(account_idx: int = -1, date_from: str = "", date_to: str = ""
 # API - 消息收藏/取消收藏
 # ============================================================
 @app.post("/api/history/{history_id}/star")
-def toggle_history_star(history_id: int):
+def toggle_history_star(history_id: int, request: Request):
     """切换历史消息的收藏状态，返回切换后的状态"""
+    user_id, _ = _user_ctx(request)
     conn = sqlite3.connect(str(HISTORY_DB_PATH))
-    row = conn.execute("SELECT starred FROM history WHERE id = ?", (history_id,)).fetchone()
+    row = conn.execute("SELECT starred FROM history WHERE id = ? AND user_id = ?", (history_id, user_id)).fetchone()
     if row is None:
         conn.close()
         raise HTTPException(404, "消息不存在")
@@ -1988,8 +2413,9 @@ def toggle_history_star(history_id: int):
 # API - 统计数据
 # ============================================================
 @app.get("/api/stats")
-def get_stats():
-    """获取统计数据：概览、趋势、账号分布、群组排行"""
+def get_stats(request: Request):
+    """获取统计数据：概览、趋势、账号分布、群组排行（按当前用户隔离）"""
+    user_id, cfg = _user_ctx(request)
     conn = sqlite3.connect(str(HISTORY_DB_PATH))
     
     # 1. 概览数据
@@ -1997,32 +2423,32 @@ def get_stats():
     yesterday = (datetime.now(SHANGHAI_TZ) - timedelta(days=1)).strftime("%Y-%m-%d")
     
     today_messages = conn.execute(
-        "SELECT COUNT(*) FROM history WHERE ts LIKE ?", (f"{today}%",)
+        "SELECT COUNT(*) FROM history WHERE user_id = ? AND ts LIKE ?", (user_id, f"{today}%")
     ).fetchone()[0]
     
     yesterday_messages = conn.execute(
-        "SELECT COUNT(*) FROM history WHERE ts LIKE ?", (f"{yesterday}%",)
+        "SELECT COUNT(*) FROM history WHERE user_id = ? AND ts LIKE ?", (user_id, f"{yesterday}%")
     ).fetchone()[0]
     
     # 活跃账号数（有消息的账号）
     active_accounts = conn.execute(
-        "SELECT COUNT(DISTINCT account_idx) FROM history"
+        "SELECT COUNT(DISTINCT account_idx) FROM history WHERE user_id = ?", (user_id,)
     ).fetchone()[0]
     
     # 总账号数
-    total_accounts = len(config.get("accounts", []))
+    total_accounts = len(cfg["accounts"])
     
     # 监控群组数（有消息的群组）
     monitored_chats = conn.execute(
-        "SELECT COUNT(DISTINCT chat_id) FROM history WHERE chat_id IS NOT NULL AND chat_id != ''"
+        "SELECT COUNT(DISTINCT chat_id) FROM history WHERE user_id = ? AND chat_id IS NOT NULL AND chat_id != ''", (user_id,)
     ).fetchone()[0]
     
     # 推送成功率（从 push_logs 表读取真实数据）
     push_total = conn.execute(
-        "SELECT COUNT(*) FROM push_logs WHERE ts LIKE ?", (f"{today}%",)
+        "SELECT COUNT(*) FROM push_logs WHERE user_id = ? AND ts LIKE ?", (user_id, f"{today}%")
     ).fetchone()[0]
     push_success = conn.execute(
-        "SELECT COUNT(*) FROM push_logs WHERE ts LIKE ? AND status = 'success'", (f"{today}%",)
+        "SELECT COUNT(*) FROM push_logs WHERE user_id = ? AND ts LIKE ? AND status = 'success'", (user_id, f"{today}%")
     ).fetchone()[0]
     push_success_rate = 100 if push_total == 0 else round(push_success / push_total * 100, 1)
     
@@ -2042,31 +2468,31 @@ def get_stats():
     for i in range(6, -1, -1):
         date = (datetime.now(SHANGHAI_TZ) - timedelta(days=i)).strftime("%Y-%m-%d")
         count = conn.execute(
-            "SELECT COUNT(*) FROM history WHERE ts LIKE ?", (f"{date}%",)
+            "SELECT COUNT(*) FROM history WHERE user_id = ? AND ts LIKE ?", (user_id, f"{date}%")
         ).fetchone()[0]
         daily_messages.append({"date": date[5:], "count": count})  # 只显示 MM-DD
     
     # 3. 各账号消息量
     account_rows = conn.execute(
-        "SELECT account_name, COUNT(*) as cnt FROM history GROUP BY account_idx ORDER BY cnt DESC"
+        "SELECT account_name, COUNT(*) as cnt FROM history WHERE user_id = ? GROUP BY account_idx ORDER BY cnt DESC", (user_id,)
     ).fetchall()
     account_messages = [{"account_name": r[0], "count": r[1]} for r in account_rows]
     
     # 4. 活跃群组 TOP10
     chat_rows = conn.execute(
-        "SELECT chat_title, COUNT(*) as cnt FROM history WHERE chat_id IS NOT NULL AND chat_id != '' GROUP BY chat_id ORDER BY cnt DESC LIMIT 10"
+        "SELECT chat_title, COUNT(*) as cnt FROM history WHERE user_id = ? AND chat_id IS NOT NULL AND chat_id != '' GROUP BY chat_id ORDER BY cnt DESC LIMIT 10", (user_id,)
     ).fetchall()
     top_chats = [{"chat_title": r[0] or "未知群组", "count": r[1]} for r in chat_rows]
     
     # 5. 规则命中率排行榜（从 history 表统计 rule_remark）
     rule_rows = conn.execute(
-        "SELECT rule_remark, COUNT(*) as cnt FROM history WHERE rule_remark != '' GROUP BY rule_remark ORDER BY cnt DESC LIMIT 10"
+        "SELECT rule_remark, COUNT(*) as cnt FROM history WHERE user_id = ? AND rule_remark != '' GROUP BY rule_remark ORDER BY cnt DESC LIMIT 10", (user_id,)
     ).fetchall()
     rule_hits = [{"rule_name": r[0], "count": r[1]} for r in rule_rows]
     
     # 6. 推送渠道分布（从 push_logs 表统计 channel_type）
     channel_rows = conn.execute(
-        "SELECT channel_type, COUNT(*) as cnt FROM push_logs GROUP BY channel_type ORDER BY cnt DESC"
+        "SELECT channel_type, COUNT(*) as cnt FROM push_logs WHERE user_id = ? GROUP BY channel_type ORDER BY cnt DESC", (user_id,)
     ).fetchall()
     channel_distribution = [{"channel": r[0], "count": r[1]} for r in channel_rows]
     
@@ -2087,7 +2513,14 @@ def get_stats():
 # ============================================================
 @app.get("/api/check_auth")
 async def check_auth(request: Request):
-    return {"authenticated": verify_session(request)}
+    user = verify_session(request)
+    if not user:
+        return {"authenticated": False}
+    return {
+        "authenticated": True,
+        "username": user.get("username"),
+        "role": user.get("role", "user"),
+    }
 
 
 # ============================================================

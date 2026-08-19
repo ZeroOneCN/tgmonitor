@@ -96,6 +96,21 @@ body {
 .error-msg.show {
   display: block;
 }
+.switch-link {
+  margin-top: 20px;
+  text-align: center;
+  font-size: 13px;
+  color: #636e72;
+}
+.switch-link a {
+  color: #4A90D9;
+  text-decoration: none;
+  font-weight: 500;
+  margin-left: 2px;
+}
+.switch-link a:hover {
+  text-decoration: underline;
+}
 </style>
 </head>
 <body>
@@ -103,12 +118,12 @@ body {
   <div class="logo-area">
     <img src="/logo.svg" alt="Logo">
     <h1>Telegram 监控后台</h1>
-    <p>请输入管理员账号密码登录</p>
+    <p id="pageDesc">请输入账号密码登录</p>
   </div>
   <form id="loginForm">
     <div class="form-group">
       <label>用户名</label>
-      <input type="text" id="username" placeholder="请输入用户名" value="admin" autocomplete="username">
+      <input type="text" id="username" placeholder="请输入用户名" autocomplete="username">
     </div>
     <div class="form-group">
       <label>密码</label>
@@ -116,10 +131,39 @@ body {
     </div>
     <button type="submit" class="btn-login" id="submitBtn">登录</button>
     <div class="error-msg" id="errorMsg"></div>
+    <div class="switch-link">
+      <span id="switchText">还没有账号？</span>
+      <a href="#" id="switchLink" onclick="toggleMode(event)">去注册</a>
+    </div>
   </form>
 </div>
 
 <script>
+let mode = 'login'; // login / register
+
+function toggleMode(event) {
+  if (event) event.preventDefault();
+  mode = mode === 'login' ? 'register' : 'login';
+  const submitBtn = document.getElementById('submitBtn');
+  const pageDesc = document.getElementById('pageDesc');
+  const switchText = document.getElementById('switchText');
+  const switchLink = document.getElementById('switchLink');
+  document.getElementById('errorMsg').classList.remove('show');
+  if (mode === 'register') {
+    pageDesc.textContent = '创建新账号，注册后即可使用';
+    submitBtn.textContent = '注册';
+    switchText.textContent = '已有账号？';
+    switchLink.textContent = '去登录';
+    document.getElementById('password').setAttribute('autocomplete', 'new-password');
+  } else {
+    pageDesc.textContent = '请输入账号密码登录';
+    submitBtn.textContent = '登录';
+    switchText.textContent = '还没有账号？';
+    switchLink.textContent = '去注册';
+    document.getElementById('password').setAttribute('autocomplete', 'current-password');
+  }
+}
+
 document.getElementById('loginForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const username = document.getElementById('username').value.trim();
@@ -134,11 +178,12 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
   }
 
   submitBtn.disabled = true;
-  submitBtn.textContent = '登录中...';
+  submitBtn.textContent = mode === 'register' ? '注册中...' : '登录中...';
   errorMsg.classList.remove('show');
 
   try {
-    const res = await fetch('/api/login', {
+    const url = mode === 'register' ? '/api/register' : '/api/login';
+    const res = await fetch(url, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({username, password})
@@ -149,16 +194,16 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
       document.cookie = `session_token=${data.token}; path=/; max-age=31536000; SameSite=Lax`;
       window.location.href = '/';
     } else {
-      errorMsg.textContent = data.message || '登录失败';
+      errorMsg.textContent = data.message || (mode === 'register' ? '注册失败' : '登录失败');
       errorMsg.classList.add('show');
       submitBtn.disabled = false;
-      submitBtn.textContent = '登录';
+      submitBtn.textContent = mode === 'register' ? '注册' : '登录';
     }
   } catch (err) {
     errorMsg.textContent = '网络错误，请重试';
     errorMsg.classList.add('show');
     submitBtn.disabled = false;
-    submitBtn.textContent = '登录';
+    submitBtn.textContent = mode === 'register' ? '注册' : '登录';
   }
 });
 </script>

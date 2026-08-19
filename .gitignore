@@ -7,6 +7,7 @@ session_*.session-journal
 
 # 数据库
 history.db
+users.db
 
 # 日志文件
 *.log
