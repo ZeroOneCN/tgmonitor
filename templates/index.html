@@ -296,6 +296,27 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
         <canvas id="chart-top-chats"></canvas>
       </div>
     </div>
+
+    <div class="chart-container">
+      <h3>推送成功率</h3>
+      <div class="chart-wrapper">
+        <canvas id="chart-push-success"></canvas>
+      </div>
+    </div>
+
+    <div class="chart-container">
+      <h3>规则命中率 TOP 10</h3>
+      <div class="chart-wrapper">
+        <canvas id="chart-rule-hits"></canvas>
+      </div>
+    </div>
+
+    <div class="chart-container">
+      <h3>推送渠道分布</h3>
+      <div class="chart-wrapper">
+        <canvas id="chart-channel-dist"></canvas>
+      </div>
+    </div>
   </section>
 
   <!-- 实时日志 -->
@@ -1333,6 +1354,9 @@ function resetHistoryFilter() {
 let chartDailyMessages = null;
 let chartAccountMessages = null;
 let chartTopChats = null;
+let chartPushSuccess = null;
+let chartRuleHits = null;
+let chartChannelDist = null;
 
 async function loadStats() {
   try {
@@ -1356,6 +1380,9 @@ async function loadStats() {
     renderDailyMessagesChart(res.daily_messages);
     renderAccountMessagesChart(res.account_messages);
     renderTopChatsChart(res.top_chats);
+    renderPushSuccessChart({ success: res.overview.push_success || 0, failed: (res.overview.push_total || 0) - (res.overview.push_success || 0) });
+    renderRuleHitsChart(res.rule_hits || []);
+    renderChannelDistChart(res.channel_distribution || []);
   } catch (e) {
     console.error('加载统计数据失败:', e);
   }
@@ -1441,6 +1468,86 @@ function renderTopChatsChart(data) {
       },
       scales: {
         x: { beginAtZero: true }
+      }
+    }
+  });
+}
+
+function renderPushSuccessChart(data) {
+  const ctx = document.getElementById('chart-push-success').getContext('2d');
+  if (chartPushSuccess) chartPushSuccess.destroy();
+  
+  chartPushSuccess = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: ['成功', '失败'],
+      datasets: [{
+        data: [data.success, data.failed],
+        backgroundColor: ['#27ae60', '#e74c3c']
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'bottom' }
+      }
+    }
+  });
+}
+
+function renderRuleHitsChart(data) {
+  const ctx = document.getElementById('chart-rule-hits').getContext('2d');
+  if (chartRuleHits) chartRuleHits.destroy();
+  
+  chartRuleHits = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: data.map(d => d.rule_name),
+      datasets: [{
+        label: '命中次数',
+        data: data.map(d => d.count),
+        backgroundColor: '#9b59b6'
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false }
+      },
+      scales: {
+        x: { beginAtZero: true }
+      }
+    }
+  });
+}
+
+function renderChannelDistChart(data) {
+  const ctx = document.getElementById('chart-channel-dist').getContext('2d');
+  if (chartChannelDist) chartChannelDist.destroy();
+  
+  const channelNames = {
+    'telegram_bot': 'Telegram Bot',
+    'wecom': '企业微信',
+    'generic': '通用 Webhook'
+  };
+  
+  chartChannelDist = new Chart(ctx, {
+    type: 'pie',
+    data: {
+      labels: data.map(d => channelNames[d.channel] || d.channel),
+      datasets: [{
+        data: data.map(d => d.count),
+        backgroundColor: ['#3498db', '#2ecc71', '#f39c12']
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'bottom' }
       }
     }
   });

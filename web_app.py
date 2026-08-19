@@ -192,6 +192,23 @@ def init_history_db():
             conn.execute("ALTER TABLE history ADD COLUMN media_path TEXT DEFAULT ''")
     except Exception:
         pass
+    
+    # 创建推送日志表
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS push_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL,
+            account_name TEXT NOT NULL,
+            account_idx INTEGER NOT NULL,
+            channel_type TEXT NOT NULL,
+            channel_index INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            error_message TEXT DEFAULT '',
+            retry_count INTEGER DEFAULT 0,
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -446,13 +463,32 @@ def _do_webhook_post(url: str, payload: dict):
         return False, str(e)
 
 
-async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optional[dict] = None):
+async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optional[dict] = None, 
+                              account_name: str = "", account_idx: int = -1, rule_remark: str = ""):
+    """发送 webhook 推送并记录推送日志"""
+    now_ts = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    
     for idx, wh in enumerate(webhooks):
         url = wh.get("url", "").strip()
         if not url or not wh.get("enabled", True):
             continue
+        
+        # 判断渠道类型
         bot_token = wh.get("telegram_bot_token", "").strip()
         bot_chat_id = wh.get("telegram_chat_id", "").strip()
+        
+        # 确定渠道类型
+        if bot_token and bot_chat_id:
+            channel_type = "telegram_bot"
+        elif "qyapi.weixin.qq.com" in url:
+            channel_type = "wecom"
+        else:
+            channel_type = "generic"
+        
+        # 记录推送开始
+        push_status = "success"
+        error_msg = ""
+        
         if bot_token and bot_chat_id:
             text = alert_text[:4096]
             params = urllib.parse.urlencode({"chat_id": bot_chat_id, "text": text, "parse_mode": "Markdown"})
@@ -462,6 +498,8 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                 logger.info(f"  Webhook [{idx}] (Bot) 推送成功")
             else:
                 logger.warning(f"  Webhook [{idx}] (Bot) 推送失败: {err_msg[:200]}")
+                push_status = "failed"
+                error_msg = err_msg[:500]
             continue
         # 企业微信机器人：支持媒体推送
         if "qyapi.weixin.qq.com" in url:
@@ -472,6 +510,8 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                 logger.info(f"  Webhook [{idx}] 文本推送成功")
             else:
                 logger.warning(f"  Webhook [{idx}] 文本推送失败: {err_msg[:200]}")
+                push_status = "failed"
+                error_msg = err_msg[:500]
             # 如果有媒体，再推送媒体消息
             if media_data:
                 file_bytes = media_data.get("bytes")
@@ -548,6 +588,20 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                 logger.info(f"  Webhook [{idx}] 推送成功")
             else:
                 logger.warning(f"  Webhook [{idx}] 推送失败: {err_msg[:200]}")
+                push_status = "failed"
+                error_msg = err_msg[:500]
+        
+        # 写入推送日志
+        try:
+            conn = sqlite3.connect(str(HISTORY_DB_PATH))
+            conn.execute(
+                "INSERT INTO push_logs (ts, account_name, account_idx, channel_type, channel_index, status, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (now_ts, account_name, account_idx, channel_type, idx, push_status, error_msg)
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"记录推送日志失败: {e}")
 
 
 # ============================================================
@@ -906,7 +960,7 @@ class AsyncMonitor:
                             if u:
                                 wh_list.append(gw)
                     if wh_list:
-                        asyncio.ensure_future(send_webhook_alerts(alert, wh_list, media_data))
+                        asyncio.ensure_future(send_webhook_alerts(alert, wh_list, media_data, account_name, self.account_idx, remark))
             except Exception as e:
                 logger.error(f"[{account_name}] 处理消息异常: {e}")
 
@@ -1534,9 +1588,13 @@ def get_stats():
         "SELECT COUNT(DISTINCT chat_id) FROM history WHERE chat_id IS NOT NULL AND chat_id != ''"
     ).fetchone()[0]
     
-    # 推送成功率（暂时用消息总数作为基数，后续可扩展推送日志表）
-    push_total = today_messages
-    push_success = today_messages  # 简化处理，后续可接入推送日志
+    # 推送成功率（从 push_logs 表读取真实数据）
+    push_total = conn.execute(
+        "SELECT COUNT(*) FROM push_logs WHERE ts LIKE ?", (f"{today}%",)
+    ).fetchone()[0]
+    push_success = conn.execute(
+        "SELECT COUNT(*) FROM push_logs WHERE ts LIKE ? AND status = 'success'", (f"{today}%",)
+    ).fetchone()[0]
     push_success_rate = 100 if push_total == 0 else round(push_success / push_total * 100, 1)
     
     overview = {
@@ -1571,6 +1629,18 @@ def get_stats():
     ).fetchall()
     top_chats = [{"chat_title": r[0] or "未知群组", "count": r[1]} for r in chat_rows]
     
+    # 5. 规则命中率排行榜（从 history 表统计 rule_remark）
+    rule_rows = conn.execute(
+        "SELECT rule_remark, COUNT(*) as cnt FROM history WHERE rule_remark != '' GROUP BY rule_remark ORDER BY cnt DESC LIMIT 10"
+    ).fetchall()
+    rule_hits = [{"rule_name": r[0], "count": r[1]} for r in rule_rows]
+    
+    # 6. 推送渠道分布（从 push_logs 表统计 channel_type）
+    channel_rows = conn.execute(
+        "SELECT channel_type, COUNT(*) as cnt FROM push_logs GROUP BY channel_type ORDER BY cnt DESC"
+    ).fetchall()
+    channel_distribution = [{"channel": r[0], "count": r[1]} for r in channel_rows]
+    
     conn.close()
     
     return {
@@ -1578,6 +1648,8 @@ def get_stats():
         "daily_messages": daily_messages,
         "account_messages": account_messages,
         "top_chats": top_chats,
+        "rule_hits": rule_hits,
+        "channel_distribution": channel_distribution,
     }
 
 
