@@ -11,6 +11,7 @@ import logging
 import sqlite3
 import hashlib
 import secrets
+import shutil
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -182,16 +183,28 @@ def init_history_db():
             media_type TEXT DEFAULT '',
             media_path TEXT DEFAULT '',
             rule_remark TEXT DEFAULT '',
+            msg_id TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         )
     """)
-    # 迁移：旧库补充 media_path 字段
+    # 迁移：旧库补充 media_path / msg_id 字段
     try:
         cols = [r[1] for r in conn.execute("PRAGMA table_info(history)").fetchall()]
         if "media_path" not in cols:
             conn.execute("ALTER TABLE history ADD COLUMN media_path TEXT DEFAULT ''")
+        if "msg_id" not in cols:
+            conn.execute("ALTER TABLE history ADD COLUMN msg_id TEXT DEFAULT ''")
     except Exception:
         pass
+    # 去重唯一索引：(account_idx, msg_id)，保证同账号同消息不重复入库
+    try:
+        conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_history_dedup ON history (account_idx, msg_id)")
+    except Exception:
+        # 旧库已存在重复数据时降级为普通索引，去重交给应用层检查
+        try:
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_history_dedup ON history (account_idx, msg_id)")
+        except Exception:
+            pass
     
     # 创建推送日志表
     conn.execute("""
@@ -213,11 +226,12 @@ def init_history_db():
     conn.close()
 
 
-def save_history(account_name: str, account_idx: int, chat_title: str, chat_id, sender_name: str, sender_id, text: str, has_media: bool, media_type: str, rule_remark: str, media_path: str = ""):
+def save_history(account_name: str, account_idx: int, chat_title: str, chat_id, sender_name: str, sender_id, text: str, has_media: bool, media_type: str, rule_remark: str, media_path: str = "", msg_id=None):
+    """保存历史消息，返回 True 表示新插入，False 表示重复已忽略"""
     try:
         conn = sqlite3.connect(str(HISTORY_DB_PATH))
-        conn.execute(
-            "INSERT INTO history (ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, media_path, rule_remark) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO history (ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, media_path, rule_remark, msg_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S"),
                 str(account_name), int(account_idx),
@@ -225,16 +239,77 @@ def save_history(account_name: str, account_idx: int, chat_title: str, chat_id, 
                 str(sender_name or ""), str(sender_id or ""),
                 str(text or ""), 1 if has_media else 0,
                 str(media_type or ""), str(media_path or ""), str(rule_remark or ""),
+                str(msg_id or ""),
             ]
         )
+        inserted = cur.rowcount > 0
         conn.commit()
         conn.close()
+        return inserted
     except Exception:
-        pass
+        return True
+
+
+def is_history_duplicate(account_idx: int, msg_id) -> bool:
+    """检查 (account_idx, msg_id) 是否已入库（用于消息去重，避免重启/重连重复推送）"""
+    if msg_id is None:
+        return False
+    try:
+        conn = sqlite3.connect(str(HISTORY_DB_PATH))
+        row = conn.execute(
+            "SELECT 1 FROM history WHERE account_idx = ? AND msg_id = ? LIMIT 1",
+            (int(account_idx), str(msg_id)),
+        ).fetchone()
+        conn.close()
+        return row is not None
+    except Exception:
+        return False
 
 
 # 启动时初始化
 init_history_db()
+
+
+# ============================================================
+# 自动备份（APScheduler 每日 03:00 备份 SQLite，保留最近 7 天）
+# ============================================================
+BACKUP_DIR = BASE_DIR / "backups"
+BACKUP_KEEP_DAYS = 7
+
+
+def backup_database():
+    """复制 history.db 到 backups 目录，并清理 7 天前的旧备份"""
+    try:
+        if not HISTORY_DB_PATH.exists():
+            return
+        BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(SHANGHAI_TZ).strftime("%Y%m%d_%H%M%S")
+        dst = BACKUP_DIR / f"history_{ts}.db"
+        shutil.copy2(str(HISTORY_DB_PATH), str(dst))
+        logger.info(f"数据库已自动备份: {dst.name}")
+        # 保留最近 N 天备份，删除更早的
+        backups = sorted(BACKUP_DIR.glob("history_*.db"))
+        for old in backups[:-BACKUP_KEEP_DAYS]:
+            try:
+                old.unlink()
+                logger.info(f"已清理过期备份: {old.name}")
+            except Exception:
+                pass
+    except Exception as e:
+        logger.error(f"数据库备份失败: {e}")
+
+
+def start_backup_scheduler():
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        _sched = BackgroundScheduler(timezone="Asia/Shanghai")
+        _sched.add_job(backup_database, "cron", hour=3, minute=0)
+        _sched.start()
+        logger.info("自动备份任务已启动（每日 03:00，保留 7 天）")
+    except ImportError:
+        logger.warning("未安装 APScheduler，自动备份未启用（pip install APScheduler）")
+    except Exception as e:
+        logger.error(f"启动自动备份任务失败: {e}")
 
 
 # ============================================================
@@ -463,6 +538,40 @@ def _do_webhook_post(url: str, payload: dict):
         return False, str(e)
 
 
+async def _post_with_retry(url: str, payload: dict, attempts: int = 3):
+    """推送失败重试：指数退避（1s→2s→4s）。返回 (ok, err_msg, retry_count)"""
+    last_err = ""
+    for attempt in range(attempts):
+        ok, err_msg = await asyncio.to_thread(_do_webhook_post, url, payload)
+        if ok:
+            return True, "", attempt
+        last_err = err_msg
+        if attempt < attempts - 1:
+            await asyncio.sleep(2 ** attempt)  # 1s → 2s → 4s
+    return False, last_err, attempts
+
+
+# ============================================================
+# 通知频率限制（每通知渠道独立计数器，超过 limit 条/分钟暂停）
+# ============================================================
+PUSH_RATE_LIMIT = 20          # 每渠道每分钟最多推送条数（超过则跳过，防刷屏）
+PUSH_RATE_WINDOW = 60         # 统计窗口（秒）
+_channel_rate: dict[str, list] = {}
+
+
+def _rate_allowed(channel_key: str) -> bool:
+    """返回该渠道是否允许继续推送，同时清理过期计数"""
+    import time as _time
+    now = _time.time()
+    records = _channel_rate.setdefault(channel_key, [])
+    # 清理窗口外的记录
+    _channel_rate[channel_key] = [t for t in records if now - t < PUSH_RATE_WINDOW]
+    if len(_channel_rate[channel_key]) >= PUSH_RATE_LIMIT:
+        return False
+    _channel_rate[channel_key].append(now)
+    return True
+
+
 async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optional[dict] = None, 
                               account_name: str = "", account_idx: int = -1, rule_remark: str = ""):
     """发送 webhook 推送并记录推送日志"""
@@ -485,17 +594,24 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
         else:
             channel_type = "generic"
         
+        # P0-1.3 通知频率限制：每渠道独立计数器，超过限制暂停本次推送
+        channel_key = f"{account_name}|{account_idx}|{channel_type}|{url}"
+        if not _rate_allowed(channel_key):
+            logger.warning(f"  Webhook [{idx}] 触发频率限制（{PUSH_RATE_LIMIT}条/分钟），本次推送已跳过")
+            continue
+        
         # 记录推送开始
         push_status = "success"
         error_msg = ""
+        retry_count = 0
         
         if bot_token and bot_chat_id:
             text = alert_text[:4096]
             params = urllib.parse.urlencode({"chat_id": bot_chat_id, "text": text, "parse_mode": "Markdown"})
             bot_url = f"https://api.telegram.org/bot{bot_token}/sendMessage?{params}"
-            ok, err_msg = await asyncio.to_thread(_do_webhook_post, bot_url, {})
+            ok, err_msg, retry_count = await _post_with_retry(bot_url, {})
             if ok:
-                logger.info(f"  Webhook [{idx}] (Bot) 推送成功")
+                logger.info(f"  Webhook [{idx}] (Bot) 推送成功{'（重试%d次）' % retry_count if retry_count else ''}")
             else:
                 logger.warning(f"  Webhook [{idx}] (Bot) 推送失败: {err_msg[:200]}")
                 push_status = "failed"
@@ -505,9 +621,9 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
         if "qyapi.weixin.qq.com" in url:
             # 先发送文本消息
             payload = {"msgtype": "markdown", "markdown": {"content": alert_text}}
-            ok, err_msg = await asyncio.to_thread(_do_webhook_post, url, payload)
+            ok, err_msg, retry_count = await _post_with_retry(url, payload)
             if ok:
-                logger.info(f"  Webhook [{idx}] 文本推送成功")
+                logger.info(f"  Webhook [{idx}] 文本推送成功{'（重试%d次）' % retry_count if retry_count else ''}")
             else:
                 logger.warning(f"  Webhook [{idx}] 文本推送失败: {err_msg[:200]}")
                 push_status = "failed"
@@ -560,21 +676,40 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                         continue
                     file_size_mb = len(file_bytes) / (1024 * 1024)
                     if wecom_type == "image":
-                        # 图片：直接用 base64 发送，无需上传
+                        # 图片：直接用 base64 发送，无需上传（失败指数退避重试）
                         logger.info(f"  Webhook [{idx}] 发送图片 {filename} (size={file_size_mb:.2f}MB)")
-                        ok2, err2 = await asyncio.to_thread(wecom_send_image_direct, url, file_bytes)
+                        ok2, err2 = False, "未尝试"
+                        for _r in range(3):
+                            ok2, err2 = await asyncio.to_thread(wecom_send_image_direct, url, file_bytes)
+                            if ok2:
+                                break
+                            if _r < 2:
+                                await asyncio.sleep(2 ** _r)
                         if ok2:
                             logger.info(f"  Webhook [{idx}] 图片推送成功 ({filename})")
                         else:
                             logger.warning(f"  Webhook [{idx}] 图片推送失败: {err2[:200]}")
                     else:
-                        # 视频/文件：上传后用 media_id 发送
+                        # 视频/文件：上传后用 media_id 发送（失败指数退避重试）
                         logger.info(f"  Webhook [{idx}] 上传 {filename} (type={wecom_type}, size={file_size_mb:.2f}MB)")
-                        mid, err_msg = await asyncio.to_thread(wecom_upload_media, url, file_bytes, filename, wecom_type)
+                        mid = ""
+                        err_msg = ""
+                        for _r in range(3):
+                            mid, err_msg = await asyncio.to_thread(wecom_upload_media, url, file_bytes, filename, wecom_type)
+                            if mid:
+                                break
+                            if _r < 2:
+                                await asyncio.sleep(2 ** _r)
                         if err_msg:
                             logger.warning(f"  Webhook [{idx}] {err_msg}")
                         if mid:
-                            ok2, err2 = await asyncio.to_thread(wecom_send_media, url, mid, wecom_type)
+                            ok2, err2 = False, "未尝试"
+                            for _r in range(3):
+                                ok2, err2 = await asyncio.to_thread(wecom_send_media, url, mid, wecom_type)
+                                if ok2:
+                                    break
+                                if _r < 2:
+                                    await asyncio.sleep(2 ** _r)
                             if ok2:
                                 logger.info(f"  Webhook [{idx}] 媒体推送成功 ({filename})")
                             else:
@@ -583,7 +718,7 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                             logger.warning(f"  Webhook [{idx}] 媒体上传失败")
         else:
             payload = {"title": "Telegram监控告警", "text": alert_text, "source": "tg_monitor"}
-            ok, err_msg = await asyncio.to_thread(_do_webhook_post, url, payload)
+            ok, err_msg, retry_count = await _post_with_retry(url, payload)
             if ok:
                 logger.info(f"  Webhook [{idx}] 推送成功")
             else:
@@ -595,8 +730,8 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
         try:
             conn = sqlite3.connect(str(HISTORY_DB_PATH))
             conn.execute(
-                "INSERT INTO push_logs (ts, account_name, account_idx, channel_type, channel_index, status, error_message) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (now_ts, account_name, account_idx, channel_type, idx, push_status, error_msg)
+                "INSERT INTO push_logs (ts, account_name, account_idx, channel_type, channel_index, status, error_message, retry_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (now_ts, account_name, account_idx, channel_type, idx, push_status, error_msg, retry_count)
             )
             conn.commit()
             conn.close()
@@ -862,6 +997,10 @@ class AsyncMonitor:
                     if not km:
                         continue
                     matched = True
+                    # P0-1.1 消息去重：同账号同消息已处理过则跳过转发/推送，避免重启/重连重复
+                    if is_history_duplicate(self.account_idx, msg.id):
+                        logger.info(f"[{account_name}] 重复消息已去重: chat={chat_title} msg_id={msg.id}")
+                        continue
                     logger.info(f"[{account_name}] 收到消息: chat={chat_title}({chat_id}) sender={sender_name}({sender_id}) text={text[:50]}")
                     logger.info(f"[{account_name}] 规则 '{rule.get('remark', '')}': 匹配成功")
                     remark = rule.get("remark", "规则")
@@ -941,7 +1080,7 @@ class AsyncMonitor:
                         except Exception as e:
                             logger.warning(f"[{account_name}] 下载媒体失败: {e}")
                     save_history(account_name, self.account_idx, chat_title, chat_id,
-                                 sender_name, sender_id, text, has_media, media_type, remark, media_path)
+                                 sender_name, sender_id, text, has_media, media_type, remark, media_path, msg.id)
                     # Webhook：规则级优先，有规则级则跳过全局
                     wh_list = []
                     if rule.get("webhook_enabled"):
@@ -1726,6 +1865,7 @@ if __name__ == "__main__":
     print("启动服务: http://localhost:8000")
     print("手机访问: http://<电脑IP>:8000（需在同一局域网）")
     print()
-    print("按 Ctrl+C 停止服务")
+    print("按键 Ctrl+C 停止服务")
     print("=" * 60)
+    start_backup_scheduler()
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="warning")
