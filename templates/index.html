@@ -231,10 +231,10 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
   <h1><img src="/logo.svg" alt="Telegram"> Telegram 群聊频道消息监控后台</h1>
   <nav>
     <button class="tab-btn active" onclick="switchTab('accounts')">账号管理</button>
-    <button class="tab-btn" onclick="switchTab('stats')">统计</button>
+    <button class="tab-btn" onclick="switchTab('stats')">数据统计</button>
     <button class="tab-btn" onclick="switchTab('history')">历史消息</button>
     <button class="tab-btn" onclick="switchTab('logs')">实时日志</button>
-    <button class="tab-btn" onclick="switchTab('settings')">设置</button>
+    <button class="tab-btn" onclick="switchTab('settings')">系统设置</button>
     <button class="tab-btn" id="tab-btn-users" onclick="switchTab('users')" style="display:none;">用户管理</button>
   </nav>
   <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;">
@@ -365,14 +365,36 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
         </div>
       </div>
     </div>
+
+    <div class="settings-section" style="margin-top: 20px;">
+      <h3>服务状态</h3>
+      <div class="text-sm mb-8">服务健康检查与一键重启（重启时会短暂中断，由 PM2 自动拉起）。</div>
+      <div class="form-row" style="align-items: center; flex-wrap: wrap;">
+        <div class="form-group">
+          <label>检查时间</label>
+          <div class="text-sm" id="health-time" style="line-height: 32px; color: #636e72;">-</div>
+        </div>
+        <div class="form-group">
+          <label>状态</label>
+          <div class="text-sm" id="health-status" style="line-height: 32px; color: #27ae60;">-</div>
+        </div>
+        <div class="form-group" style="margin-left: auto;">
+          <button class="btn btn-outline btn-sm" onclick="checkHealth()">健康检查</button>
+          <button class="btn btn-danger btn-sm" onclick="adminRestart()" id="admin-restart-btn" style="display:none;">一键重启</button>
+        </div>
+      </div>
+    </div>
   </section>
 
   <!-- 用户管理（仅管理员可见） -->
   <section id="tab-users" class="tab-content">
+    <!-- 全局概览卡片 -->
+    <div class="stats-grid" id="overview-cards"></div>
+
     <div class="settings-section">
       <div class="toolbar">
         <button class="btn btn-primary" onclick="showAddUser()">+ 新建用户</button>
-        <button class="btn btn-secondary" onclick="loadUsers()">刷新</button>
+        <button class="btn btn-secondary" onclick="loadUsers();loadAdminOverview()">刷新</button>
       </div>
       <table class="history-table" style="width:100%;border-collapse:collapse;">
         <thead>
@@ -383,13 +405,80 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
             <th style="text-align:left;padding:10px 12px;border-bottom:2px solid #e8eaed;">历史消息</th>
             <th style="text-align:left;padding:10px 12px;border-bottom:2px solid #e8eaed;">状态</th>
             <th style="text-align:left;padding:10px 12px;border-bottom:2px solid #e8eaed;">注册时间</th>
-            <th style="text-align:left;padding:10px 12px;border-bottom:2px solid #e8eaed;">操作</th>
+            <th style="text-align:center;padding:10px 12px;border-bottom:2px solid #e8eaed;">操作</th>
           </tr>
         </thead>
         <tbody id="user-list-body"></tbody>
       </table>
     </div>
   </section>
+
+  <!-- 用户详情/编辑/封禁/重置密码 模态框 -->
+  <div class="modal-overlay" id="user-detail-modal">
+    <div class="modal" style="max-width: 720px;">
+      <button class="modal-close" onclick="closeModal('user-detail-modal')">&times;</button>
+      <h2 id="user-detail-title">用户详情</h2>
+      <div id="user-detail-body" style="max-height: 70vh; overflow: auto;"></div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('user-detail-modal')">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="user-edit-modal">
+    <div class="modal">
+      <button class="modal-close" onclick="closeModal('user-edit-modal')">&times;</button>
+      <h2>编辑用户</h2>
+      <input type="hidden" id="user-edit-id">
+      <div class="form-group">
+        <label>用户名 <span class="required">*</span></label>
+        <input class="form-control" id="user-edit-username" placeholder="用户名">
+      </div>
+      <div class="form-group">
+        <label>角色</label>
+        <select class="form-control" id="user-edit-role">
+          <option value="user">普通用户</option>
+          <option value="admin">管理员</option>
+        </select>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('user-edit-modal')">取消</button>
+        <button class="btn btn-primary" onclick="saveEditUser()">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="user-ban-modal">
+    <div class="modal">
+      <button class="modal-close" onclick="closeModal('user-ban-modal')">&times;</button>
+      <h2>封禁用户</h2>
+      <input type="hidden" id="user-ban-id">
+      <div class="form-group">
+        <label>封禁理由</label>
+        <textarea class="form-control" id="user-ban-reason" rows="3" placeholder="请输入封禁理由（将展示给该用户）"></textarea>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('user-ban-modal')">取消</button>
+        <button class="btn btn-danger" onclick="submitBan()">确认封禁</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="user-reset-pwd-modal">
+    <div class="modal">
+      <button class="modal-close" onclick="closeModal('user-reset-pwd-modal')">&times;</button>
+      <h2>重置密码</h2>
+      <input type="hidden" id="user-reset-id">
+      <div class="form-group">
+        <label>新密码 <span class="required">*</span></label>
+        <input class="form-control" id="user-reset-pass" type="password" placeholder="至少6位">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('user-reset-pwd-modal')">取消</button>
+        <button class="btn btn-primary" onclick="submitResetPwd()">确认重置</button>
+      </div>
+    </div>
+  </div>
 
   <!-- 历史消息 -->
   <section id="tab-history" class="tab-content">
@@ -586,10 +675,31 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
       <div class="form-group">
         <button class="btn btn-outline btn-sm" onclick="saveAsTemplate()">保存为模板</button>
       </div>
+      <div class="form-group">
+        <button class="btn btn-outline btn-sm" onclick="manageRuleTemplates()">管理模板</button>
+      </div>
     </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal('rule-modal')">取消</button>
       <button class="btn btn-primary" onclick="saveRule()">保存</button>
+    </div>
+  </div>
+</div>
+
+<!-- 规则模板管理模态框 -->
+<div class="modal-overlay" id="template-manage-modal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('template-manage-modal')">&times;</button>
+    <h2>管理规则模板</h2>
+    <table class="history-table" style="width:100%;border-collapse:collapse;" id="template-manage-table">
+      <thead>
+        <tr><th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e8eaed;">模板名称</th>
+        <th style="text-align:right;padding:8px 10px;border-bottom:2px solid #e8eaed;">操作</th></tr>
+      </thead>
+      <tbody id="template-manage-body"></tbody>
+    </table>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" onclick="closeModal('template-manage-modal')">关闭</button>
     </div>
   </div>
 </div>
@@ -703,7 +813,7 @@ function switchTab(name) {
   if (name === 'accounts') loadAccounts();
   if (name === 'settings') loadSettings();
   if (name === 'stats') loadStats();
-  if (name === 'users') loadUsers();
+  if (name === 'users') { loadAdminOverview(); loadUsers(); }
 }
 
 // ============================================================
@@ -1187,6 +1297,54 @@ async function saveAsTemplate() {
   }
 }
 
+// 管理模板（重命名/删除）
+async function manageRuleTemplates() {
+  try {
+    const templates = await api('GET', '/api/rule-templates');
+    const body = document.getElementById('template-manage-body');
+    if (!templates.length) {
+      body.innerHTML = '<tr><td colspan="2" style="padding:16px;color:#b2bec3;text-align:center;">暂无模板</td></tr>';
+    } else {
+      body.innerHTML = templates.map(t => `
+        <tr style="border-bottom:1px solid #f0f0f0;">
+          <td style="padding:8px 10px;">${escHtml(t.name)}</td>
+          <td style="padding:6px 8px;text-align:right;white-space:nowrap;">
+            <button class="btn btn-sm btn-secondary" onclick="renameRuleTemplate('${escHtml(t.name)}')">重命名</button>
+            <button class="btn btn-sm btn-danger" onclick="deleteRuleTemplate('${escHtml(t.name)}')">删除</button>
+          </td>
+        </tr>`).join('');
+    }
+    openModal('template-manage-modal');
+  } catch (e) {
+    showAlert('加载模板失败: ' + e.message);
+  }
+}
+
+async function deleteRuleTemplate(name) {
+  if (!await showConfirm(`确定删除模板「${name}」？`)) return;
+  try {
+    await api('DELETE', `/api/rule-templates/${encodeURIComponent(name)}`);
+    showAlert(`模板「${name}」已删除`);
+    await manageRuleTemplates();
+    await loadRuleTemplates();
+  } catch (e) { showAlert('删除失败: ' + e.message); }
+}
+
+async function renameRuleTemplate(oldName) {
+  const newName = await prompt('输入新的模板名称：', oldName);
+  if (!newName || newName === oldName) return;
+  try {
+    const templates = await api('GET', '/api/rule-templates');
+    const t = templates.find(x => x.name === oldName);
+    if (!t) { showAlert('模板不存在'); return; }
+    await api('POST', '/api/rule-templates', { name: newName, ...t });
+    await api('DELETE', `/api/rule-templates/${encodeURIComponent(oldName)}`);
+    showAlert(`模板已重命名为「${newName}」`);
+    await manageRuleTemplates();
+    await loadRuleTemplates();
+  } catch (e) { showAlert('重命名失败: ' + e.message); }
+}
+
 async function editRule(accIdx, ruleIdx) {
   document.getElementById('rule-modal-title').textContent = '编辑规则';
   document.getElementById('rule-account-idx').value = accIdx;
@@ -1276,6 +1434,7 @@ async function deleteRule(accIdx, ruleIdx) {
 // ============================================================
 async function loadSettings() {
   try {
+    checkHealth();
     const s = await api('GET', '/api/settings');
     const webhooks = s.webhooks || [];
     document.getElementById('webhook-list').innerHTML = webhooks.map((wh, i) => renderWebhookRow(wh, i)).join('');
@@ -1430,6 +1589,8 @@ async function initAuth() {
       userEl.innerHTML = '&#128100; ' + escHtml(data.username) + roleText;
       if (data.role === 'admin') {
         document.getElementById('tab-btn-users').style.display = '';
+        const r = document.getElementById('admin-restart-btn');
+        if (r) r.style.display = '';
       }
     }
   } catch (e) { /* 未登录由后端重定向处理 */ }
@@ -1453,7 +1614,7 @@ async function saveNewUser() {
     if (data.status !== 'ok') { showAlert(data.message || '创建失败'); return; }
     closeModal('user-modal');
     showAlert(`用户 ${username} 创建成功`);
-    loadUsers();
+    loadUsers(); loadAdminOverview();
   } catch (e) { showAlert('创建失败: ' + e.message); }
 }
 
@@ -1463,8 +1624,157 @@ async function deleteUser(userId, username) {
     const data = await api('DELETE', `/api/users/${userId}`, null);
     if (data.status !== 'ok') { showAlert(data.message || '删除失败'); return; }
     showAlert(`用户 ${username} 已删除`);
-    loadUsers();
+    loadUsers(); loadAdminOverview();
   } catch (e) { showAlert('删除失败: ' + e.message); }
+}
+
+// 全局概览卡片
+async function loadAdminOverview() {
+  const el = document.getElementById('overview-cards');
+  try {
+    const o = await api('GET', '/api/admin/overview');
+    const cards = [
+      ['用户总数', o.users, '#4A90D9'], ['在线用户', o.online, '#27ae60'],
+      ['已封禁', o.banned, '#e74c3c'], ['账号总数', o.total_accounts, '#e67e22'],
+      ['规则总数', o.total_rules, '#9b59b6'], ['历史消息', o.total_msgs, '#2d3436'],
+      ['今日消息', o.today_msgs, '#16a085'], ['推送总量', o.push_total, '#c0392b'],
+    ];
+    el.innerHTML = cards.map(([t, v, c]) => `
+      <div class="stat-card">
+        <div class="stat-label" style="color:#636e72;">${t}</div>
+        <div class="stat-value" style="color:${c};font-size:24px;font-weight:700;">${v}</div>
+      </div>`).join('');
+  } catch (e) {
+    el.innerHTML = '<div style="color:#b2bec3;padding:12px;">概览加载失败</div>';
+  }
+}
+
+// 用户详情
+async function showUserDetail(userId) {
+  try {
+    const d = await api('GET', `/api/users/${userId}`);
+    if (d.status === 'error') { showAlert(d.message); return; }
+    const ban = d.banned
+      ? `<span style="color:#e74c3c;font-weight:500;">已封禁</span>（原因：${escHtml(d.ban_reason || '未填写')}）`
+      : '<span style="color:#27ae60;">正常</span>';
+    const accRows = (d.accounts || []).map(a => `
+        <tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:6px 8px;">${escHtml(a.remark || '未命名')}</td>
+        <td style="padding:6px 8px;">${escHtml(a.phone || '')}</td>
+        <td style="padding:6px 8px;">${(a.rules || []).length} 条规则</td></tr>`).join('') ||
+        '<tr><td colspan="3" style="padding:8px;color:#b2bec3;">暂无账号</td></tr>';
+    const hookRows = (d.webhooks || []).map(h => `
+        <tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:6px 8px;">${escHtml(h.remark || '未命名')}</td>
+        <td style="padding:6px 8px;color:#b2bec3;word-break:break-all;">${escHtml(h.url || '')}</td></tr>`).join('') ||
+        '<tr><td colspan="2" style="padding:8px;color:#b2bec3;">暂无 Webhook</td></tr>';
+    const pushRows = (d.recent_pushes || []).map(p => `
+        <tr style="border-bottom:1px solid #f0f0f0;font-size:12px;"><td style="padding:5px 8px;">${escHtml(p.ts||'')}</td>
+        <td style="padding:5px 8px;">${escHtml(p.channel_type||'')}</td>
+        <td style="padding:5px 8px;">${escHtml(p.status||'')}</td>
+        <td style="padding:5px 8px;color:#b2bec3;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(p.error_message||'')}</td></tr>`).join('') ||
+        '<tr><td colspan="4" style="padding:8px;color:#b2bec3;">暂无推送记录</td></tr>';
+    document.getElementById('user-detail-title').textContent = `用户详情 - ${d.username}`;
+    document.getElementById('user-detail-body').innerHTML = `
+      <div class="settings-section" style="margin-bottom:12px;">
+        <div class="text-sm" style="line-height:2;">
+          角色：${d.role === 'admin' ? '管理员' : '普通用户'} &nbsp;·&nbsp; 状态：${ban}<br>
+          注册时间：${escHtml(d.created_at || '')} &nbsp;·&nbsp; 清理设置：${d.cleanup ? (d.cleanup.enabled ? '开启(' + (d.cleanup.days||30) + '天)' : '关闭') : '关闭'}
+        </div>
+      </div>
+      <h3 style="margin:10px 0 6px;font-size:14px;">账号（${(d.accounts||[]).length}）</h3>
+      <table class="history-table" style="width:100%;border-collapse:collapse;">
+        <thead><tr><th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">备注</th>
+        <th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">手机号</th>
+        <th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">规则</th></tr></thead>
+        <tbody>${accRows}</tbody>
+      </table>
+      <h3 style="margin:12px 0 6px;font-size:14px;">Webhook（${(d.webhooks||[]).length}）</h3>
+      <table class="history-table" style="width:100%;border-collapse:collapse;">
+        <thead><tr><th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">备注</th>
+        <th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">地址</th></tr></thead>
+        <tbody>${hookRows}</tbody>
+      </table>
+      <h3 style="margin:12px 0 6px;font-size:14px;">最近推送（${(d.recent_pushes||[]).length}）</h3>
+      <table class="history-table" style="width:100%;border-collapse:collapse;">
+        <thead><tr><th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">时间</th>
+        <th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">渠道</th>
+        <th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">状态</th>
+        <th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">错误</th></tr></thead>
+        <tbody>${pushRows}</tbody>
+      </table>`;
+    openModal('user-detail-modal');
+  } catch (e) { showAlert('加载详情失败: ' + e.message); }
+}
+
+// 编辑用户
+function showEditUser(u) {
+  document.getElementById('user-edit-id').value = u.id;
+  document.getElementById('user-edit-username').value = u.username;
+  document.getElementById('user-edit-role').value = u.role;
+  openModal('user-edit-modal');
+}
+
+async function saveEditUser() {
+  const id = document.getElementById('user-edit-id').value;
+  const username = document.getElementById('user-edit-username').value.trim();
+  const role = document.getElementById('user-edit-role').value;
+  if (!username) { showAlert('用户名不能为空'); return; }
+  try {
+    const data = await api('PUT', `/api/users/${id}`, { username, role });
+    if (data.status !== 'ok') { showAlert(data.message || '保存失败'); return; }
+    closeModal('user-edit-modal');
+    showAlert(data.message);
+    loadUsers(); loadAdminOverview();
+  } catch (e) { showAlert('保存失败: ' + e.message); }
+}
+
+// 封禁 / 解封
+function showBanUser(u) {
+  document.getElementById('user-ban-id').value = u.id;
+  document.getElementById('user-ban-reason').value = '';
+  openModal('user-ban-modal');
+}
+
+async function submitBan() {
+  const id = document.getElementById('user-ban-id').value;
+  const reason = document.getElementById('user-ban-reason').value.trim();
+  if (!await showConfirm(`确定封禁该用户？${reason ? '理由：' + reason : ''}`)) return;
+  try {
+    const data = await api('POST', `/api/users/${id}/ban`, { reason });
+    if (data.status !== 'ok') { showAlert(data.message || '封禁失败'); return; }
+    closeModal('user-ban-modal');
+    showAlert(data.message);
+    loadUsers(); loadAdminOverview();
+  } catch (e) { showAlert('封禁失败: ' + e.message); }
+}
+
+async function unbanUser(userId) {
+  if (!await showConfirm('确定解封该用户？')) return;
+  try {
+    const data = await api('POST', `/api/users/${userId}/unban`, {});
+    if (data.status !== 'ok') { showAlert(data.message || '解封失败'); return; }
+    showAlert(data.message);
+    loadUsers(); loadAdminOverview();
+  } catch (e) { showAlert('解封失败: ' + e.message); }
+}
+
+// 重置密码
+function showResetPwd(u) {
+  document.getElementById('user-reset-id').value = u.id;
+  document.getElementById('user-reset-pass').value = '';
+  openModal('user-reset-pwd-modal');
+}
+
+async function submitResetPwd() {
+  const id = document.getElementById('user-reset-id').value;
+  const password = document.getElementById('user-reset-pass').value;
+  if (password.length < 6) { showAlert('密码长度至少6位'); return; }
+  if (!await showConfirm('确定重置该用户密码？重置后其所有会话将下线。')) return;
+  try {
+    const data = await api('POST', `/api/users/${id}/reset-password`, { password });
+    if (data.status !== 'ok') { showAlert(data.message || '重置失败'); return; }
+    closeModal('user-reset-pwd-modal');
+    showAlert(data.message);
+  } catch (e) { showAlert('重置失败: ' + e.message); }
 }
 
 async function loadUsers() {
@@ -1480,25 +1790,55 @@ async function loadUsers() {
       const role = u.role === 'admin'
         ? '<span style="color:#e67e22;font-weight:500;">管理员</span>'
         : '<span style="color:#636e72;">普通用户</span>';
-      const online = u.online
+      let statusHtml;
+      if (u.banned) statusHtml = `<span style="color:#e74c3c;" title="${escHtml(u.ban_reason || '')}">已封禁</span>`;
+      else statusHtml = u.online
         ? '<span style="color:#27ae60;">在线</span>'
         : '<span style="color:#b2bec3;">离线</span>';
-      const canDel = currentUser && u.username === currentUser.username;
-      const delBtn = canDel
-        ? '<span class="text-sm">当前账号</span>'
-        : `<button class="btn btn-sm btn-danger" onclick="deleteUser(${u.id}, '${escHtml(u.username)}')">删除</button>`;
+      const isMe = currentUser && u.username === currentUser.username;
+      const act = [];
+      act.push(`<button class="btn btn-sm btn-secondary" onclick="showUserDetail(${u.id})">详情</button>`);
+      if (!isMe) act.push(`<button class="btn btn-sm btn-secondary" onclick="showEditUser({id:${u.id},username:'${escHtml(u.username)}',role:'${u.role}'})">编辑</button>`);
+      if (u.banned) act.push(`<button class="btn btn-sm btn-success" onclick="unbanUser(${u.id})">解封</button>`);
+      else if (!isMe) act.push(`<button class="btn btn-sm btn-danger" onclick="showBanUser({id:${u.id},username:'${escHtml(u.username)}'})">封禁</button>`);
+      if (!isMe) act.push(`<button class="btn btn-sm btn-secondary" onclick="showResetPwd({id:${u.id},username:'${escHtml(u.username)}'})">重置密码</button>`);
+      if (!isMe) act.push(`<button class="btn btn-sm btn-danger" onclick="deleteUser(${u.id}, '${escHtml(u.username)}')">删除</button>`);
       return `<tr style="border-bottom:1px solid #f0f0f0;">
-        <td style="padding:10px 12px;">${escHtml(u.username)}</td>
+        <td style="padding:10px 12px;font-weight:500;">${escHtml(u.username)}${isMe ? '（我）' : ''}</td>
         <td style="padding:10px 12px;">${role}</td>
         <td style="padding:10px 12px;">${u.accounts} / ${u.rules}</td>
         <td style="padding:10px 12px;">${u.history}</td>
-        <td style="padding:10px 12px;">${online}</td>
+        <td style="padding:10px 12px;">${statusHtml}</td>
         <td style="padding:10px 12px;">${escHtml(u.created_at || '')}</td>
-        <td style="padding:10px 12px;">${delBtn}</td>
+        <td style="padding:6px 8px;text-align:center;white-space:nowrap;">${act.join(' ')}</td>
       </tr>`;
     }).join('');
   } catch (e) {
     body.innerHTML = `<tr><td colspan="7" style="padding:20px;text-align:center;color:#e74c3c;">加载失败: ${escHtml(e.message)}</td></tr>`;
+  }
+}
+
+// 一键重启（仅管理员，位于系统设置）
+async function adminRestart() {
+  if (!await showConfirm('确定重启服务？服务将短暂中断（约 1 秒），由 PM2 自动拉起。')) return;
+  try {
+    await api('POST', '/api/admin/restart', {});
+    showAlert('服务重启指令已下发，正在重启...');
+    setTimeout(() => { if (confirm('重启中，稍后是否重新加载页面并刷新状态？请稍后手动刷新。')) window.location.reload(); }, 2500);
+  } catch (e) { showAlert('重启失败: ' + e.message); }
+}
+
+async function checkHealth() {
+  try {
+    const h = await api('GET', '/api/health', null);
+    document.getElementById('health-time').textContent = h.time;
+    document.getElementById('health-status').textContent = h.status === 'ok'
+      ? `正常（运行中监控：${h.running_monitors}）` : '异常';
+    document.getElementById('health-status').style.color = h.status === 'ok' ? '#27ae60' : '#e74c3c';
+  } catch (e) {
+    document.getElementById('health-time').textContent = new Date().toLocaleString('zh-CN');
+    document.getElementById('health-status').textContent = '无法连接';
+    document.getElementById('health-status').style.color = '#e74c3c';
   }
 }
 
@@ -1509,6 +1849,7 @@ initAuth();
 loadAccounts();
 connectLogWs();
 loadHistoryAccounts();
+if (window.location.hash === '#users') { loadAdminOverview(); loadUsers(); }
 
 // ============================================================
 // 退出登录

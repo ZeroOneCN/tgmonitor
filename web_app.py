@@ -10,6 +10,7 @@ import csv
 import io
 import json
 import logging
+import os
 import sqlite3
 import hashlib
 import secrets
@@ -190,6 +191,9 @@ def init_users_db():
             webhooks TEXT NOT NULL DEFAULT '[]',
             cleanup TEXT NOT NULL DEFAULT '{}',
             rule_templates TEXT NOT NULL DEFAULT '[]',
+            banned INTEGER DEFAULT 0,
+            ban_reason TEXT DEFAULT '',
+            banned_at TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         )
     """)
@@ -201,6 +205,18 @@ def init_users_db():
             FOREIGN KEY(user_id) REFERENCES users(id)
         )
     """)
+    # 旧库迁移：补充封禁相关字段
+    try:
+        ucols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+        for col, ddl in [
+            ("banned", "ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0"),
+            ("ban_reason", "ALTER TABLE users ADD COLUMN ban_reason TEXT DEFAULT ''"),
+            ("banned_at", "ALTER TABLE users ADD COLUMN banned_at TEXT DEFAULT ''"),
+        ]:
+            if col not in ucols:
+                conn.execute(ddl)
+    except Exception:
+        pass
     conn.commit()
     conn.close()
     migrate_legacy_config()
@@ -336,7 +352,11 @@ def get_user_by_token(token: str):
 
 
 def _row_to_dict(row) -> dict:
-    return {k: row[k] for k in row.keys()}
+    d = {k: row[k] for k in row.keys()}
+    d.setdefault("banned", 0)
+    d.setdefault("ban_reason", "")
+    d.setdefault("banned_at", "")
+    return d
 
 
 def get_user_config(row) -> dict:
@@ -1540,6 +1560,10 @@ class MonitorManager:
         key = self._key(user_id, account_idx)
         if key in self.monitors and self.monitors[key].running:
             return {"status": "already_running"}
+        # 封禁用户禁止启动监控
+        owner = get_user_by_id(user_id)
+        if owner is None or owner["banned"]:
+            return {"status": "error", "message": "账号已封禁，无法启动监控"}
         accounts = self.user_accounts(user_id)
         if account_idx < 0 or account_idx >= len(accounts):
             raise HTTPException(404, "账号不存在")
@@ -1667,6 +1691,8 @@ async def login(request: Request):
     user = verify_user(username, password)
     if user is None:
         return {"status": "error", "message": "用户名或密码错误"}
+    if user["banned"]:
+        return {"status": "error", "message": f"账号已被封禁，无法登录。原因：{user['ban_reason'] or '未填写'}"}
     token = create_session(user["id"])
     return {"status": "ok", "token": token, "username": user["username"], "role": user["role"]}
 
@@ -1753,7 +1779,7 @@ async def list_users(request: Request):
     conn = _users_conn()
     try:
         rows = conn.execute(
-            "SELECT id, username, role, created_at FROM users ORDER BY id"
+            "SELECT id, username, role, banned, ban_reason, banned_at, created_at FROM users ORDER BY id"
         ).fetchall()
         sessions = dict(conn.execute(
             "SELECT user_id, COUNT(*) FROM sessions GROUP BY user_id"
@@ -1767,6 +1793,9 @@ async def list_users(request: Request):
             "id": row["id"],
             "username": row["username"],
             "role": row["role"],
+            "banned": bool(row["banned"]),
+            "ban_reason": row["ban_reason"],
+            "banned_at": row["banned_at"],
             "created_at": row["created_at"],
             "online": sessions.get(row["id"], 0) > 0,
             **counters,
@@ -1816,6 +1845,179 @@ async def delete_admin_user(user_id: int, request: Request):
     await monitor_mgr.stop_all(user_id)
     logger.info(f"[多租户] 管理员删除用户: {target['username']} (id={user_id})")
     return {"status": "ok", "message": f"用户 {target['username']} 已删除"}
+
+
+# --- 全局概览（仅管理员） ---
+@app.get("/api/admin/overview")
+async def admin_overview(request: Request):
+    _require_admin(request)
+    conn = _users_conn()
+    try:
+        user_cnt = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        admin_cnt = conn.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
+        online_cnt = conn.execute(
+            "SELECT COUNT(DISTINCT user_id) FROM sessions"
+        ).fetchone()[0]
+        banned_cnt = conn.execute("SELECT COUNT(*) FROM users WHERE banned=1").fetchone()[0]
+        rows = conn.execute("SELECT accounts, webhooks FROM users").fetchall()
+    finally:
+        conn.close()
+    total_accounts = 0
+    total_rules = 0
+    for r in rows:
+        accs = json.loads(r["accounts"] or "[]")
+        total_accounts += len(accs)
+        total_rules += sum(len(a.get("rules", [])) for a in accs)
+    # 消息总量 / 推送量
+    hist = sqlite3.connect(str(HISTORY_DB_PATH))
+    try:
+        total_msgs = hist.execute("SELECT COUNT(*) FROM history").fetchone()[0]
+        today = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
+        today_msgs = hist.execute("SELECT COUNT(*) FROM history WHERE ts LIKE ?", (f"{today}%",)).fetchone()[0]
+        push_total = hist.execute("SELECT COUNT(*) FROM push_logs").fetchone()[0]
+        push_today = hist.execute("SELECT COUNT(*) FROM push_logs WHERE ts LIKE ?", (f"{today}%",)).fetchone()[0]
+    finally:
+        hist.close()
+    return {
+        "users": user_cnt, "admins": admin_cnt, "online": online_cnt, "banned": banned_cnt,
+        "total_accounts": total_accounts, "total_rules": total_rules,
+        "total_msgs": total_msgs, "today_msgs": today_msgs,
+        "push_total": push_total, "push_today": push_today,
+    }
+
+
+# --- 用户详情（仅管理员） ---
+@app.get("/api/users/{user_id}")
+async def get_user_detail(user_id: int, request: Request):
+    _require_admin(request)
+    user = get_user_by_id(user_id)
+    if user is None:
+        return {"status": "error", "message": "用户不存在"}
+    cfg = get_user_config(user)
+    # 最近推送
+    hist = sqlite3.connect(str(HISTORY_DB_PATH))
+    try:
+        recent_pushes = [dict(r) for r in hist.execute(
+            "SELECT ts, account_name, channel_type, status, error_message FROM push_logs "
+            "WHERE user_id = ? ORDER BY id DESC LIMIT 20", (user_id,)
+        ).fetchall()]
+        recent_msgs = [dict(r) for r in hist.execute(
+            "SELECT ts, account_name, chat_title, text FROM history "
+            "WHERE user_id = ? ORDER BY id DESC LIMIT 20", (user_id,)
+        ).fetchall()]
+    finally:
+        hist.close()
+    return {
+        "username": user["username"],
+        "role": user["role"],
+        "created_at": user["created_at"],
+        "banned": bool(user["banned"]),
+        "ban_reason": user["ban_reason"],
+        "banned_at": user["banned_at"],
+        "accounts": cfg["accounts"],
+        "webhooks": cfg["webhooks"],
+        "cleanup": cfg["cleanup"],
+        "rule_templates": cfg["rule_templates"],
+        "recent_pushes": recent_pushes,
+        "recent_msgs": recent_msgs,
+    }
+
+
+# --- 编辑用户（用户名/角色） ---
+@app.put("/api/users/{user_id}")
+async def edit_user(user_id: int, request: Request, data: dict):
+    admin = _require_admin(request)
+    target = get_user_by_id(user_id)
+    if target is None:
+        return {"status": "error", "message": "用户不存在"}
+    new_username = (data.get("username") or target["username"]).strip()
+    role = data.get("role") or target["role"]
+    if role not in ("admin", "user"):
+        return {"status": "error", "message": "角色无效"}
+    # 修改当前管理员自身角色时会锁死系统，阻止降级自己为普通用户
+    if user_id == admin["id"] and role != "admin":
+        return {"status": "error", "message": "不能取消自己的管理员角色"}
+    conn = _users_conn()
+    try:
+        if new_username != target["username"]:
+            if conn.execute("SELECT id FROM users WHERE username=?", (new_username,)).fetchone():
+                return {"status": "error", "message": "用户名已存在"}
+        conn.execute("UPDATE users SET username=?, role=? WHERE id=?", (new_username, role, user_id))
+        conn.commit()
+    except sqlite3.IntegrityError:
+        return {"status": "error", "message": "用户名已存在"}
+    finally:
+        conn.close()
+    logger.info(f"[多租户] 管理员编辑用户 #{user_id}: → {new_username} (role={role})")
+    return {"status": "ok", "message": "用户信息已更新"}
+
+
+# --- 封禁/解封用户（弹窗填理由） ---
+@app.post("/api/users/{user_id}/ban")
+async def ban_user(user_id: int, request: Request, data: dict):
+    admin = _require_admin(request)
+    target = get_user_by_id(user_id)
+    if target is None:
+        return {"status": "error", "message": "用户不存在"}
+    if target["id"] == admin["id"]:
+        return {"status": "error", "message": "不能封禁当前账号"}
+    reason = (data.get("reason") or "").strip()
+    conn = _users_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET banned=1, ban_reason=?, banned_at=(datetime('now','localtime')) WHERE id=?",
+            (reason, user_id),
+        )
+        # 端掉该用户现有会话
+        conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    await monitor_mgr.stop_all(user_id)
+    logger.info(f"[多租户] 管理员封禁用户: {target['username']} (原因: {reason or '未填写'})")
+    return {"status": "ok", "message": f"用户 {target['username']} 已封禁"}
+
+
+@app.post("/api/users/{user_id}/unban")
+async def unban_user(user_id: int, request: Request):
+    _require_admin(request)
+    target = get_user_by_id(user_id)
+    if target is None:
+        return {"status": "error", "message": "用户不存在"}
+    conn = _users_conn()
+    try:
+        conn.execute("UPDATE users SET banned=0, ban_reason='' WHERE id=?", (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info(f"[多租户] 管理员解封用户: {target['username']}")
+    return {"status": "ok", "message": f"用户 {target['username']} 已解封"}
+
+
+# --- 重置用户密码（仅管理员） ---
+@app.post("/api/users/{user_id}/reset-password")
+async def reset_user_password(user_id: int, request: Request, data: dict):
+    _require_admin(request)
+    target = get_user_by_id(user_id)
+    if target is None:
+        return {"status": "error", "message": "用户不存在"}
+    password = (data.get("password") or "").strip()
+    if len(password) < 6:
+        return {"status": "error", "message": "密码长度至少6位"}
+    salt = secrets.token_hex(16)
+    conn = _users_conn()
+    try:
+        conn.execute(
+            "UPDATE users SET password_hash=?, password_salt=? WHERE id=?",
+            (hash_password(password, salt), salt, user_id),
+        )
+        # 重置密码后强制下线所有会话
+        conn.execute("DELETE FROM sessions WHERE user_id=?", (user_id,))
+        conn.commit()
+    finally:
+        conn.close()
+    logger.info(f"[多租户] 管理员重置用户密码: {target['username']}")
+    return {"status": "ok", "message": f"用户 {target['username']} 密码已重置"}
 
 
 # 全局鉴权中间件：未登录跳转 /login
@@ -2520,7 +2722,29 @@ async def check_auth(request: Request):
         "authenticated": True,
         "username": user.get("username"),
         "role": user.get("role", "user"),
+        "banned": bool(user.get("banned", 0)),
+        "ban_reason": user.get("ban_reason", ""),
     }
+
+
+@app.get("/api/health")
+async def health(request: Request):
+    """健康检查（无需登录）"""
+    running = sum(1 for m in monitor_mgr.monitors.values() if m.running)
+    return {
+        "status": "ok",
+        "time": datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+        "running_monitors": running,
+    }
+
+
+@app.post("/api/admin/restart")
+async def admin_restart(request: Request):
+    """一键重启服务（仅管理员）：退出当前进程，由 PM2 自动拉起"""
+    _require_admin(request)
+    import threading
+    threading.Timer(0.5, lambda: os._exit(0)).start()
+    return {"status": "ok", "message": "服务将在 0.5 秒后重启"}
 
 
 # ============================================================
@@ -2528,6 +2752,11 @@ async def check_auth(request: Request):
 # ============================================================
 @app.websocket("/ws/logs")
 async def ws_logs(websocket: WebSocket):
+    token = websocket.cookies.get("session_token", "")
+    user = get_user_by_token(token)
+    if user is None or user["banned"]:
+        await websocket.close(code=1008)
+        return
     await broadcaster.add_connection(websocket)
     try:
         while True:
