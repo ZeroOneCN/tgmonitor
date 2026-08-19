@@ -203,6 +203,8 @@ def init_history_db():
             media_path TEXT DEFAULT '',
             rule_remark TEXT DEFAULT '',
             msg_id TEXT DEFAULT '',
+            topic_id TEXT DEFAULT '',
+            topic_name TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         )
     """)
@@ -213,6 +215,10 @@ def init_history_db():
             conn.execute("ALTER TABLE history ADD COLUMN media_path TEXT DEFAULT ''")
         if "msg_id" not in cols:
             conn.execute("ALTER TABLE history ADD COLUMN msg_id TEXT DEFAULT ''")
+        if "topic_id" not in cols:
+            conn.execute("ALTER TABLE history ADD COLUMN topic_id TEXT DEFAULT ''")
+        if "topic_name" not in cols:
+            conn.execute("ALTER TABLE history ADD COLUMN topic_name TEXT DEFAULT ''")
     except Exception:
         pass
     # 去重唯一索引：(account_idx, msg_id)，保证同账号同消息不重复入库
@@ -273,12 +279,12 @@ def init_history_db():
     conn.close()
 
 
-def save_history(account_name: str, account_idx: int, chat_title: str, chat_id, sender_name: str, sender_id, text: str, has_media: bool, media_type: str, rule_remark: str, media_path: str = "", msg_id=None):
+def save_history(account_name: str, account_idx: int, chat_title: str, chat_id, sender_name: str, sender_id, text: str, has_media: bool, media_type: str, rule_remark: str, media_path: str = "", msg_id=None, topic_id="", topic_name=""):
     """保存历史消息，返回 True 表示新插入，False 表示重复已忽略"""
     try:
         conn = sqlite3.connect(str(HISTORY_DB_PATH))
         cur = conn.execute(
-            "INSERT OR IGNORE INTO history (ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, media_path, rule_remark, msg_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO history (ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, media_path, rule_remark, msg_id, topic_id, topic_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
                 datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S"),
                 str(account_name), int(account_idx),
@@ -286,7 +292,7 @@ def save_history(account_name: str, account_idx: int, chat_title: str, chat_id, 
                 str(sender_name or ""), str(sender_id or ""),
                 str(text or ""), 1 if has_media else 0,
                 str(media_type or ""), str(media_path or ""), str(rule_remark or ""),
-                str(msg_id or ""),
+                str(msg_id or ""), str(topic_id or ""), str(topic_name or ""),
             ]
         )
         inserted = cur.rowcount > 0
@@ -921,6 +927,37 @@ def keyword_matches(text, rule):
     return True
 
 
+def topic_matches(topic_id, topic_name, rule):
+    """话题组过滤：规则配置了 topic_ids / topic_titles 时才生效，未配置则放行"""
+    ids = rule.get("topic_ids") or []
+    names = rule.get("topic_titles") or []
+    if not ids and not names:
+        return True
+    if topic_id is not None and ids:
+        id_strs = set(str(v) for v in ids)
+        if str(topic_id) in id_strs:
+            return True
+    if topic_name and names:
+        if any(n.strip().lower() in topic_name.lower() for n in names):
+            return True
+    return False
+
+
+def get_topic_info(msg):
+    """提取消息的话题组基础信息，返回 (topic_id, topic_name)。topic_name 需客户端解析后补充。"""
+    topic_id = ""
+    topic_name = ""
+    try:
+        reply_to = getattr(msg, "reply_to", None)
+        if reply_to is not None and getattr(reply_to, "forum_topic", False):
+            tid = getattr(reply_to, "reply_to_top_id", None) or getattr(reply_to, "reply_to_msg_id", None)
+            if tid is not None:
+                topic_id = str(tid)
+    except Exception:
+        pass
+    return topic_id, topic_name
+
+
 MEDIA_CN = {
     "image": "图片",
     "video": "视频",
@@ -981,7 +1018,7 @@ def media_ext(msg, media_type: str) -> str:
     return ".bin"
 
 
-def format_alert(event, rule_remark, chat_title, sender_name):
+def format_alert(event, rule_remark, chat_title, sender_name, topic_name=""):
     msg = event.message
     text = msg.text or ""
     if len(text) > 200:
@@ -992,6 +1029,8 @@ def format_alert(event, rule_remark, chat_title, sender_name):
     meta_parts = [f"规则:{rule_remark}"]
     if chat_title:
         meta_parts.append(f"来源:{chat_title}")
+    if topic_name:
+        meta_parts.append(f"话题:{topic_name}")
     if sender_name:
         meta_parts.append(f"发送者:{sender_name}")
     meta_line = " | ".join(meta_parts)
@@ -1015,6 +1054,24 @@ class AsyncMonitor:
         self.client: Optional[TelegramClient] = None
         self.running = False
         self._stop_event = asyncio.Event()
+        self._topic_cache: dict = {}
+
+    async def resolve_topic_name(self, chat_id, topic_id):
+        """根据群组 ID + 话题 ID 解析话题名称（带缓存），失败返回空串"""
+        key = (str(chat_id), str(topic_id))
+        if key in self._topic_cache:
+            return self._topic_cache[key]
+        name = ""
+        try:
+            from telethon.tl.functions.messages import GetForumTopicsByIDRequest
+            res = await self.client(GetForumTopicsByIDRequest(peer=chat_id, topics=[int(topic_id)]))
+            topics = getattr(res, "topics", [])
+            if topics and getattr(topics[0], "title", None):
+                name = topics[0].title
+        except Exception:
+            name = ""
+        self._topic_cache[key] = name
+        return name
 
     def session_path(self):
         phone = self.account.get("phone", "").replace("+", "").replace(" ", "")
@@ -1078,6 +1135,10 @@ class AsyncMonitor:
                 sender_username = getattr(sender, "username", None)
                 sender_name = get_display_name(sender) if sender else "(未知)"
                 text = msg.text or ""
+                # 3.6 话题组识别：提取话题 ID/名称（名称由客户端解析，失败则留空）
+                topic_id, topic_name = get_topic_info(msg)
+                if topic_id and chat_id is not None:
+                    topic_name = await self.resolve_topic_name(chat_id, topic_id)
                 # 只处理匹配规则的消息
                 matched = False
                 for rule in rules:
@@ -1090,6 +1151,11 @@ class AsyncMonitor:
                     km = keyword_matches(text, rule)
                     if not km:
                         continue
+                    # 3.7 话题组过滤：未配置 topic_ids/topic_titles 时放行
+                    tm = topic_matches(topic_id, topic_name, rule)
+                    if not tm:
+                        logger.info(f"[{account_name}] 话题过滤未命中: chat={chat_title} topic_id={topic_id} topic={topic_name}")
+                        continue
                     matched = True
                     # P0-1.1 消息去重：同账号同消息已处理过则跳过转发/推送，避免重启/重连重复
                     if is_history_duplicate(self.account_idx, msg.id):
@@ -1098,7 +1164,7 @@ class AsyncMonitor:
                     logger.info(f"[{account_name}] 收到消息: chat={chat_title}({chat_id}) sender={sender_name}({sender_id}) text={text[:50]}")
                     logger.info(f"[{account_name}] 规则 '{rule.get('remark', '')}': 匹配成功")
                     remark = rule.get("remark", "规则")
-                    alert = format_alert(event, remark, chat_title, sender_name)
+                    alert = format_alert(event, remark, chat_title, sender_name, topic_name)
                     logger.info(f"\n[{account_name}] {alert}")
                     if rule.get("forward_to_saved", True):
                         try:
@@ -1174,7 +1240,7 @@ class AsyncMonitor:
                         except Exception as e:
                             logger.warning(f"[{account_name}] 下载媒体失败: {e}")
                     save_history(account_name, self.account_idx, chat_title, chat_id,
-                                 sender_name, sender_id, text, has_media, media_type, remark, media_path, msg.id)
+                                 sender_name, sender_id, text, has_media, media_type, remark, media_path, msg.id, topic_id, topic_name)
                     # Webhook：规则级优先，有规则级则跳过全局
                     wh_list = []
                     if rule.get("webhook_enabled"):

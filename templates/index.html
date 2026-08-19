@@ -467,6 +467,16 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
     </div>
     <div class="form-row">
       <div class="form-group">
+        <label>话题 ID <span class="hint">留空=不过滤；仅监听指定话题组</span></label>
+        <input class="form-control" id="rule-topic-ids" placeholder="例如：1024, 2048（话题线程ID）">
+      </div>
+      <div class="form-group">
+        <label>话题名称</label>
+        <input class="form-control" id="rule-topic-titles" placeholder="例如：公告, 交易, 求助">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
         <label>包含关键词</label>
         <input class="form-control" id="rule-keys-include" placeholder="例如：报警, 紧急, 重要">
       </div>
@@ -1033,7 +1043,7 @@ function showAddRule(accIdx) {
   document.getElementById('rule-modal-title').textContent = '添加规则';
   document.getElementById('rule-account-idx').value = accIdx;
   document.getElementById('rule-edit-idx').value = '-1';
-  ['rule-remark','rule-user-ids','rule-usernames','rule-chat-ids','rule-keys-include','rule-keys-exclude',
+  ['rule-remark','rule-user-ids','rule-usernames','rule-chat-ids','rule-topic-ids','rule-topic-titles','rule-keys-include','rule-keys-exclude',
    'rule-webhook-url','rule-webhook-bot-token','rule-webhook-chat-id'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('rule-forward-saved').checked = true;
   document.getElementById('rule-webhook-enabled').checked = false;
@@ -1060,6 +1070,8 @@ function getRuleFormData() {
     target_user_ids: parseIdList(document.getElementById('rule-user-ids').value),
     target_usernames: parseList(document.getElementById('rule-usernames').value),
     chat_ids: parseIdList(document.getElementById('rule-chat-ids').value),
+    topic_ids: parseList(document.getElementById('rule-topic-ids').value),
+    topic_titles: parseList(document.getElementById('rule-topic-titles').value),
     keywords_include: parseList(document.getElementById('rule-keys-include').value),
     keywords_exclude: parseList(document.getElementById('rule-keys-exclude').value),
     forward_to_saved: document.getElementById('rule-forward-saved').checked,
@@ -1083,6 +1095,8 @@ async function applyRuleTemplate() {
     document.getElementById('rule-user-ids').value = (t.target_user_ids || []).join(', ');
     document.getElementById('rule-usernames').value = (t.target_usernames || []).join(', ');
     document.getElementById('rule-chat-ids').value = (t.chat_ids || []).join(', ');
+    document.getElementById('rule-topic-ids').value = (t.topic_ids || []).join(', ');
+    document.getElementById('rule-topic-titles').value = (t.topic_titles || []).join(', ');
     document.getElementById('rule-keys-include').value = (t.keywords_include || []).join(', ');
     document.getElementById('rule-keys-exclude').value = (t.keywords_exclude || []).join(', ');
     document.getElementById('rule-forward-saved').checked = t.forward_to_saved !== false;
@@ -1121,6 +1135,8 @@ async function editRule(accIdx, ruleIdx) {
     document.getElementById('rule-user-ids').value = (r.target_user_ids || []).join(', ');
     document.getElementById('rule-usernames').value = (r.target_usernames || []).join(', ');
     document.getElementById('rule-chat-ids').value = (r.chat_ids || []).join(', ');
+    document.getElementById('rule-topic-ids').value = (r.topic_ids || []).join(', ');
+    document.getElementById('rule-topic-titles').value = (r.topic_titles || []).join(', ');
     document.getElementById('rule-keys-include').value = (r.keywords_include || []).join(', ');
     document.getElementById('rule-keys-exclude').value = (r.keywords_exclude || []).join(', ');
     document.getElementById('rule-forward-saved').checked = r.forward_to_saved !== false;
@@ -1158,6 +1174,8 @@ async function saveRule() {
     target_user_ids: parseIdList(document.getElementById('rule-user-ids').value),
     target_usernames: parseList(document.getElementById('rule-usernames').value),
     chat_ids: parseIdList(document.getElementById('rule-chat-ids').value),
+    topic_ids: parseList(document.getElementById('rule-topic-ids').value),
+    topic_titles: parseList(document.getElementById('rule-topic-titles').value),
     keywords_include: parseList(document.getElementById('rule-keys-include').value),
     keywords_exclude: parseList(document.getElementById('rule-keys-exclude').value),
     forward_to_saved: document.getElementById('rule-forward-saved').checked,
@@ -1433,6 +1451,7 @@ async function loadHistory(page) {
             <div style="font-size:12px;color:#636e72;display:flex;align-items:center;gap:8px;">
               <span>${escHtml(item.rule_remark)}</span>
               <span style="display:inline-block;min-width:160px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;" title="${escHtml(item.chat_title)}">${escHtml(item.chat_title)}</span>
+              ${item.topic_name && item.topic_name !== '' ? `<span style="display:inline-block;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;vertical-align:middle;background:#e8f1fd;color:#4A90D9;border-radius:4px;padding:0 6px;font-size:11px;" title="#${escHtml(item.topic_name)}">#${escHtml(item.topic_name)}</span>` : ''}
             </div>
           </div>
           <div style="margin-top:6px;font-size:13px;color:#2d3436;display:flex;align-items:center;gap:6px;">
