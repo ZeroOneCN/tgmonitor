@@ -500,6 +500,21 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
     </div>
     <input type="hidden" id="rule-account-idx" value="-1">
     <input type="hidden" id="rule-edit-idx" value="-1">
+    <hr>
+    <div class="form-row" style="align-items: end;">
+      <div class="form-group" style="flex:1;">
+        <label>规则模板（一键套用）</label>
+        <select class="form-control" id="rule-template-select">
+          <option value="">-- 选择模板 --</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <button class="btn btn-outline btn-sm" onclick="applyRuleTemplate()">套用</button>
+      </div>
+      <div class="form-group">
+        <button class="btn btn-outline btn-sm" onclick="saveAsTemplate()">保存为模板</button>
+      </div>
+    </div>
     <div class="modal-footer">
       <button class="btn btn-secondary" onclick="closeModal('rule-modal')">取消</button>
       <button class="btn btn-primary" onclick="saveRule()">保存</button>
@@ -1022,7 +1037,77 @@ function showAddRule(accIdx) {
    'rule-webhook-url','rule-webhook-bot-token','rule-webhook-chat-id'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('rule-forward-saved').checked = true;
   document.getElementById('rule-webhook-enabled').checked = false;
+  loadRuleTemplates();
   openModal('rule-modal');
+}
+
+// 规则模板：加载列表到下拉
+async function loadRuleTemplates() {
+  try {
+    const templates = await api('GET', '/api/rule-templates');
+    const sel = document.getElementById('rule-template-select');
+    sel.innerHTML = '<option value="">-- 选择模板 --</option>' +
+      templates.map(t => `<option value="${escHtml(t.name)}">${escHtml(t.name)}</option>`).join('');
+  } catch (e) {
+    console.error('加载规则模板失败:', e);
+  }
+}
+
+// 从表单收集当前规则数据
+function getRuleFormData() {
+  return {
+    remark: document.getElementById('rule-remark').value.trim(),
+    target_user_ids: parseIdList(document.getElementById('rule-user-ids').value),
+    target_usernames: parseList(document.getElementById('rule-usernames').value),
+    chat_ids: parseIdList(document.getElementById('rule-chat-ids').value),
+    keywords_include: parseList(document.getElementById('rule-keys-include').value),
+    keywords_exclude: parseList(document.getElementById('rule-keys-exclude').value),
+    forward_to_saved: document.getElementById('rule-forward-saved').checked,
+    webhook_enabled: document.getElementById('rule-webhook-enabled').checked,
+    webhook_url: document.getElementById('rule-webhook-url').value.trim(),
+    webhook_bot_token: document.getElementById('rule-webhook-bot-token').value.trim(),
+    webhook_chat_id: document.getElementById('rule-webhook-chat-id').value.trim(),
+  };
+}
+
+// 套用选中模板
+async function applyRuleTemplate() {
+  const sel = document.getElementById('rule-template-select');
+  const name = sel.value;
+  if (!name) { showAlert('请先选择模板'); return; }
+  try {
+    const templates = await api('GET', '/api/rule-templates');
+    const t = templates.find(x => x.name === name);
+    if (!t) { showAlert('模板不存在'); return; }
+    document.getElementById('rule-remark').value = t.remark || name;
+    document.getElementById('rule-user-ids').value = (t.target_user_ids || []).join(', ');
+    document.getElementById('rule-usernames').value = (t.target_usernames || []).join(', ');
+    document.getElementById('rule-chat-ids').value = (t.chat_ids || []).join(', ');
+    document.getElementById('rule-keys-include').value = (t.keywords_include || []).join(', ');
+    document.getElementById('rule-keys-exclude').value = (t.keywords_exclude || []).join(', ');
+    document.getElementById('rule-forward-saved').checked = t.forward_to_saved !== false;
+    document.getElementById('rule-webhook-enabled').checked = !!t.webhook_enabled;
+    document.getElementById('rule-webhook-url').value = t.webhook_url || '';
+    document.getElementById('rule-webhook-bot-token').value = t.webhook_bot_token || '';
+    document.getElementById('rule-webhook-chat-id').value = t.webhook_chat_id || '';
+    showAlert('模板已套用，记得保存');
+  } catch (e) {
+    showAlert('套用失败: ' + e.message);
+  }
+}
+
+// 保存当前规则为模板
+async function saveAsTemplate() {
+  const remark = document.getElementById('rule-remark').value.trim();
+  const name = await prompt('输入模板名称：', remark || '新模板');
+  if (!name) return;
+  try {
+    await api('POST', '/api/rule-templates', { name, ...getRuleFormData() });
+    await loadRuleTemplates();
+    showAlert('模板已保存');
+  } catch (e) {
+    showAlert('保存模板失败: ' + e.message);
+  }
 }
 
 async function editRule(accIdx, ruleIdx) {
@@ -1043,6 +1128,7 @@ async function editRule(accIdx, ruleIdx) {
     document.getElementById('rule-webhook-url').value = r.webhook_url || '';
     document.getElementById('rule-webhook-bot-token').value = r.webhook_bot_token || '';
     document.getElementById('rule-webhook-chat-id').value = r.webhook_chat_id || '';
+    loadRuleTemplates();
     openModal('rule-modal');
   } catch (e) {
     showAlert('加载规则失败: ' + e.message);

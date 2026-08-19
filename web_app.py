@@ -54,6 +54,7 @@ def default_config() -> dict:
             "enabled": False,
             "keep_days": 30,
         },
+        "rule_templates": [],
     }
 
 
@@ -134,6 +135,13 @@ class ConfigManager:
 
     def set_cleanup(self, cleanup: dict):
         self.cfg["cleanup"] = cleanup
+        self.save()
+
+    def get_rule_templates(self) -> list:
+        return self.cfg.setdefault("rule_templates", [])
+
+    def set_rule_templates(self, templates: list):
+        self.cfg["rule_templates"] = templates
         self.save()
 
     def set_admin_password(self, username: str, password: str):
@@ -1699,6 +1707,41 @@ def delete_rule(idx: int, ridx: int):
     accounts[idx]["rules"] = rules
     config.update_account(idx, accounts[idx])
     logger.info(f"已删除规则 #{ridx}")
+    return {"status": "ok"}
+
+
+# ============================================================
+# API - 规则模板（常用规则一键套用）
+# ============================================================
+@app.get("/api/rule-templates")
+def list_rule_templates():
+    return config.get_rule_templates()
+
+
+@app.post("/api/rule-templates")
+def save_rule_template(data: dict):
+    name = str(data.get("name", "")).strip()
+    if not name:
+        raise HTTPException(400, "模板名称不能为空")
+    tpl = {k: v for k, v in data.items() if k != "name"}
+    tpl["name"] = name
+    templates = config.get_rule_templates()
+    for i, t in enumerate(templates):
+        if t.get("name") == name:
+            templates[i] = tpl
+            break
+    else:
+        templates.append(tpl)
+    config.set_rule_templates(templates)
+    logger.info(f"规则模板已保存: {name}")
+    return {"status": "ok"}
+
+
+@app.delete("/api/rule-templates/{name}")
+def delete_rule_template(name: str):
+    templates = config.get_rule_templates()
+    config.set_rule_templates([t for t in templates if t.get("name") != name])
+    logger.info(f"规则模板已删除: {name}")
     return {"status": "ok"}
 
 
