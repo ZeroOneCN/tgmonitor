@@ -1,6 +1,8 @@
-# Telegram 多账号监控工具
+# Telegram 多账号监控工具（多用户版）
 
-监控 Telegram 群或频道中**指定用户**的发言，支持**多账号同时监控**，自动转发到 Saved Messages + Webhook 手机推送（企业微信机器人 / Telegram Bot）。
+监控 Telegram 群或频道中**指定用户**的发言，支持**多个 Telegram 账号同时监控**，自动转发到 Saved Messages + Webhook 手机推送（企业微信机器人 / Telegram Bot）。
+
+> 本分支为**多用户版**：支持多租户，多个用户可注册登录，各自拥有独立的账号、规则、历史消息与推送记录。管理员可在后台统一管理用户（详情/编辑/封禁/重置密码）并查看全局概览。
 
 ---
 
@@ -8,15 +10,16 @@
 
 | 文件 | 作用 |
 |------|------|
-| web_app.py | Web 管理后台 — FastAPI 后端 |
-| templates/index.html | Web 前端页面 |
-| templates/login.html | 登录页面 |
-| templates/setup.html | 首次初始化管理员页面 |
-| tg_helper.py | 辅助工具：查 chat_id / user_id |
-| config.json | 配置文件（Web 界面自动管理） |
-| [requirements.txt | 依赖列表 |
-| ecosystem.config.js | PM2 进程管理配置 |
-| tg-monitor.nginx.conf | Nginx 反向代理配置示例 |
+| `web_app.py` | Web 管理后台 — FastAPI 后端 |
+| `templates/index.html` | Web 前端页面 |
+| `templates/login.html` | 登录页面 |
+| `templates/setup.html` | 首次初始化管理员页面 |
+| `tg_helper.py` | 辅助工具：查 chat_id / user_id |
+| `config.json` | 配置文件（Web 界面自动管理） |
+| `users.db` | 用户/会话数据库（多租户，自动生成） |
+| `requirements.txt` | 依赖列表 |
+| `ecosystem.config.js` | PM2 进程管理配置 |
+| `tg-monitor.nginx.conf` | Nginx 反向代理配置示例 |
 | session_xxx.session | 登录会话文件（每个账号各一个，自动生成） |
 | history.db | 历史消息记录数据库（自动生成） |
 | monitor.log | 运行日志 |
@@ -44,10 +47,11 @@ python web_app.py
 
 ### 3. 功能说明
 
-**用户登录：**
+**用户登录（多租户）：**
 - 首次启动自动进入初始化页面，设置管理员账号密码
-- 所有页面需登录后访问，防止未授权使用
-- 点击右上角「退出」按钮退出登录，不影响监控任务
+- 支持多用户注册登录（登录页「注册」），每个用户账号、规则、历史消息、推送记录相互隔离
+- 管理员可在「用户管理」tab 查看用户详情、编辑、封禁/解封（填理由）、重置密码
+- 所有页面需登录后访问；点击右上角「退出」退出登录，不影响监控任务
 
 **账号管理：**
 - 点击「添加账号」填入手机号、api_id、api_hash、代理地址
