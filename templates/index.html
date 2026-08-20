@@ -8,8 +8,10 @@
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
-  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
   background: #f5f6fa; color: #2d3436; min-height: 100vh;
+  font-size: 14px; line-height: 1.55; -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 /* 顶部导航 */
@@ -35,6 +37,30 @@ nav { display: flex; gap: 2px; height: 100%; }
 .tab-btn:hover { color: #4A90D9; background: #f0f4ff; }
 .tab-btn.active { color: #4A90D9; border-bottom-color: #4A90D9; }
 
+/* 右上角用户下拉菜单 */
+.user-menu-wrap { position: relative; }
+.user-menu-trigger {
+  font-size: 13px; color: #636e72; cursor: pointer;
+  padding: 6px 10px; border-radius: 6px; user-select: none;
+  transition: all 0.2s;
+}
+.user-menu-trigger:hover { background: #f0f4ff; color: #2d3436; }
+.user-menu {
+  display: none; position: absolute; top: 34px; right: 0;
+  background: #fff; border-radius: 10px; min-width: 140px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.12); padding: 6px 0;
+  z-index: 200; border: 1px solid #eef1f5;
+}
+.user-menu.open { display: block; animation: menuIn 0.15s ease; }
+@keyframes menuIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+.user-menu-item {
+  padding: 10px 16px; font-size: 13px; color: #2d3436;
+  cursor: pointer; transition: background 0.15s;
+}
+.user-menu-item:hover { background: #f0f4ff; }
+.user-menu-item--danger { color: #e74c3c; }
+.user-menu-item--danger:hover { background: #fef0f0; }
+
 /* 主内容 - 铺满布局 */
 main { padding: 24px; width: 100%; }
 .tab-content { display: none; }
@@ -52,29 +78,31 @@ main { padding: 24px; width: 100%; }
 @media (max-width: 900px) { #overview-cards { grid-template-columns: repeat(2, 1fr); } }
 @media (max-width: 560px) { #overview-cards { grid-template-columns: 1fr; } }
 .stat-card {
-  background: #fff; border-radius: 10px; padding: 20px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.06); border: 1px solid #e8eaed;
+  background: #fff; border-radius: 12px; padding: 18px 20px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06); border: 1px solid #eef0f4;
+  transition: transform 0.18s, box-shadow 0.18s;
 }
-.stat-card h4 { font-size: 14px; color: #636e72; margin-bottom: 8px; font-weight: 500; }
-.stat-card .value { font-size: 32px; font-weight: 600; color: #2d3436; }
-.stat-card .sub { font-size: 12px; color: #b2bec3; margin-top: 4px; }
+.stat-card:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgba(74,144,217,0.12); }
+.stat-card h4 { font-size: 13px; color: #8a94a6; margin-bottom: 8px; font-weight: 500; letter-spacing: 0.3px; }
+.stat-card .value { font-size: 30px; font-weight: 700; color: #2d3436; line-height: 1.1; }
+.stat-card .sub { font-size: 12px; color: #b2bec3; margin-top: 6px; }
 
 /* 图表容器 */
 .chart-container {
-  background: #fff; border-radius: 10px; padding: 20px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.06); border: 1px solid #e8eaed;
+  background: #fff; border-radius: 12px; padding: 20px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06); border: 1px solid #eef0f4;
   margin-bottom: 16px;
 }
-.chart-container h3 { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #2d3436; }
+.chart-container h3 { font-size: 15px; font-weight: 600; margin-bottom: 16px; color: #2d3436; }
 .chart-wrapper { position: relative; height: 300px; }
 
 /* 账号卡片 */
 .account-card {
-  background: #fff; border-radius: 10px; padding: 20px; margin-bottom: 14px;
-  box-shadow: 0 1px 4px rgba(0,0,0,0.06); border: 1px solid #e8eaed;
-  transition: box-shadow 0.2s;
+  background: #fff; border-radius: 12px; padding: 18px 20px; margin-bottom: 14px;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.06); border: 1px solid #eef0f4;
+  transition: box-shadow 0.2s, transform 0.18s;
 }
-.account-card:hover { box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+.account-card:hover { box-shadow: 0 6px 18px rgba(0,0,0,0.08); }
 .account-header {
   display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;
 }
@@ -169,7 +197,11 @@ main { padding: 24px; width: 100%; }
 .form-row { display: flex; gap: 14px; }
 .form-row .form-group { flex: 1; }
 .form-check { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-.form-check input[type="checkbox"] { width: 16px; height: 16px; cursor: pointer; accent-color: #4A90D9; }
+.form-check input[type="checkbox"] {
+  width: 17px; height: 17px; cursor: pointer; accent-color: #4A90D9;
+  flex-shrink: 0;
+}
+.form-check input[type="checkbox"]:hover { filter: brightness(0.95); }
 .form-check label { font-size: 14px; cursor: pointer; user-select: none; }
 
 /* 模态框 */
@@ -268,9 +300,12 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
     <button class="tab-btn" onclick="switchTab('settings')">系统设置</button>
     <button class="tab-btn" id="tab-btn-users" onclick="switchTab('users')" style="display:none;">用户管理</button>
   </nav>
-  <div style="display:flex;align-items:center;gap:10px;flex-shrink:0;">
-    <span id="current-user" style="font-size:13px;color:#636e72;"></span>
-    <button class="btn btn-sm btn-secondary" onclick="logout()" title="退出登录">退出</button>
+  <div class="user-menu-wrap" style="position:relative;flex-shrink:0;">
+    <span id="current-user" class="user-menu-trigger" onclick="toggleUserMenu(event)"></span>
+    <div id="user-menu" class="user-menu">
+      <div class="user-menu-item" onclick="showChangePasswordModal()">修改密码</div>
+      <div class="user-menu-item user-menu-item--danger" onclick="logout()">退出登录</div>
+    </div>
   </div>
 </header>
 
@@ -397,29 +432,6 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
       </div>
     </div>
 
-    <div class="settings-section" style="margin-top: 20px;">
-      <h3>账号安全</h3>
-      <p class="text-sm mb-8">修改当前登录账号的密码（修改后其它登录会话将自动下线）。</p>
-      <div class="form-row" style="align-items: end; flex-wrap: wrap;">
-        <div class="form-group">
-          <label>当前密码</label>
-          <input class="form-control" id="cp-old-pass" type="password" placeholder="当前密码" style="width: 180px;">
-        </div>
-        <div class="form-group">
-          <label>新密码</label>
-          <input class="form-control" id="cp-new-pass" type="password" placeholder="至少6位" style="width: 180px;">
-        </div>
-        <div class="form-group">
-          <label>确认新密码</label>
-          <input class="form-control" id="cp-new-pass2" type="password" placeholder="再次输入新密码" style="width: 180px;">
-        </div>
-        <div class="form-group">
-          <label>&nbsp;</label>
-          <button class="btn btn-primary btn-sm" onclick="changePassword()" style="width:100%;">修改密码</button>
-        </div>
-      </div>
-    </div>
-
     <div class="settings-section" id="service-status-section" style="margin-top: 20px; display:none;">
       <h3>服务状态</h3>
       <div class="text-sm mb-8">服务健康检查与一键重启（仅管理员可见，重启时会短暂中断，由 PM2 自动拉起）。</div>
@@ -530,6 +542,30 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
       <div class="modal-footer">
         <button class="btn btn-secondary" onclick="closeModal('user-reset-pwd-modal')">取消</button>
         <button class="btn btn-primary" onclick="submitResetPwd()">确认重置</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 修改密码 模态框 -->
+  <div class="modal-overlay" id="cp-modal">
+    <div class="modal">
+      <button class="modal-close" onclick="closeModal('cp-modal')">&times;</button>
+      <h2>修改密码</h2>
+      <div class="form-group">
+        <label>当前密码 <span class="required">*</span></label>
+        <input class="form-control" id="cp-old-pass" type="password" placeholder="当前密码">
+      </div>
+      <div class="form-group">
+        <label>新密码 <span class="required">*</span></label>
+        <input class="form-control" id="cp-new-pass" type="password" placeholder="至少6位">
+      </div>
+      <div class="form-group">
+        <label>确认新密码 <span class="required">*</span></label>
+        <input class="form-control" id="cp-new-pass2" type="password" placeholder="再次输入新密码">
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary" onclick="closeModal('cp-modal')">取消</button>
+        <button class="btn btn-primary" onclick="changePassword()">确认修改</button>
       </div>
     </div>
   </div>
@@ -1031,6 +1067,12 @@ function ruleDetail(rule) {
 function escHtml(s) {
   if (s == null) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function formatPlatform(p) {
+  const m = { wecom: '企业微信', feishu: '飞书', dingtalk: '钉钉', custom: '自定义', tg: 'Telegram' };
+  if (m[p]) return m[p];
+  return '自动识别';
 }
 
 // ============================================================
@@ -1565,6 +1607,22 @@ function renderWebhookRow(wh, idx) {
       </div>
       <div class="form-row">
         <div class="form-group">
+          <label>Webhook名称</label>
+          <input class="form-control wh-input" id="wh-${idx}-name" value="${escHtml(wh.name || '')}" placeholder="例如：企微通知">
+        </div>
+        <div class="form-group">
+          <label>平台类型</label>
+          <select class="form-control wh-input" id="wh-${idx}-platform">
+            <option value="">自动识别</option>
+            <option value="wecom" ${wh.platform === 'wecom' ? 'selected' : ''}>企业微信</option>
+            <option value="feishu" ${wh.platform === 'feishu' ? 'selected' : ''}>飞书</option>
+            <option value="dingtalk" ${wh.platform === 'dingtalk' ? 'selected' : ''}>钉钉</option>
+            <option value="custom" ${wh.platform === 'custom' ? 'selected' : ''}>自定义</option>
+          </select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
           <label>Bot Token <span class="hint">方式A</span></label>
           <input class="form-control wh-input" id="wh-${idx}-bot-token" value="${escHtml(wh.telegram_bot_token || '')}" placeholder="123456:ABC-DEF...">
         </div>
@@ -1586,7 +1644,7 @@ function addWebhookRow() {
   const empty = container.querySelector('.empty-state');
   if (empty) container.innerHTML = '';
   const idx = container.querySelectorAll('.account-card').length;
-  container.insertAdjacentHTML('beforeend', renderWebhookRow({ enabled: false, telegram_bot_token: '', telegram_chat_id: '', url: '' }, idx));
+  container.insertAdjacentHTML('beforeend', renderWebhookRow({ enabled: false, name: '', platform: '', telegram_bot_token: '', telegram_chat_id: '', url: '' }, idx));
 }
 
 function removeWebhookRow(idx) {
@@ -1615,6 +1673,8 @@ async function saveSettings() {
   const cards = container.querySelectorAll('.account-card');
   const webhooks = Array.from(cards).map((card, i) => ({
     enabled: document.getElementById(`wh-${i}-enabled`)?.checked || false,
+    name: document.getElementById(`wh-${i}-name`)?.value?.trim() || '',
+    platform: document.getElementById(`wh-${i}-platform`)?.value || '',
     telegram_bot_token: document.getElementById(`wh-${i}-bot-token`)?.value?.trim() || '',
     telegram_chat_id: document.getElementById(`wh-${i}-bot-chat-id`)?.value?.trim() || '',
     url: document.getElementById(`wh-${i}-url`)?.value?.trim() || '',
@@ -1636,6 +1696,36 @@ async function saveSettings() {
 }
 
 // 修改当前用户密码（管理员/普通用户通用）
+function showChangePasswordModal() {
+  document.getElementById('cp-old-pass').value = '';
+  document.getElementById('cp-new-pass').value = '';
+  document.getElementById('cp-new-pass2').value = '';
+  closeUserMenu();
+  openModal('cp-modal');
+  setTimeout(() => { const el = document.getElementById('cp-old-pass'); if (el) el.focus(); }, 50);
+}
+
+function toggleUserMenu(e) {
+  if (e) e.stopPropagation();
+  const menu = document.getElementById('user-menu');
+  menu.classList.toggle('open');
+}
+function closeUserMenu() {
+  const menu = document.getElementById('user-menu');
+  if (menu) menu.classList.remove('open');
+}
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('.user-menu-wrap')) closeUserMenu();
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') { closeUserMenu(); closeModalOnEsc(e); }
+});
+function closeModalOnEsc(e) {
+  document.querySelectorAll('.modal-overlay').forEach(m => {
+    if (m.classList.contains('active')) m.classList.remove('active');
+  });
+}
+
 async function changePassword() {
   const oldPass = document.getElementById('cp-old-pass').value;
   const newPass = document.getElementById('cp-new-pass').value;
@@ -1650,6 +1740,7 @@ async function changePassword() {
     document.getElementById('cp-old-pass').value = '';
     document.getElementById('cp-new-pass').value = '';
     document.getElementById('cp-new-pass2').value = '';
+    closeModal('cp-modal');
     showAlert(data.message);
   } catch (e) { showAlert('修改失败: ' + e.message); }
 }
@@ -1774,15 +1865,10 @@ async function showUserDetail(userId) {
         <td style="padding:6px 8px;">${(a.rules || []).length} 条规则</td></tr>`).join('') ||
         '<tr><td colspan="3" style="padding:8px;color:#b2bec3;">暂无账号</td></tr>';
     const hookRows = (d.webhooks || []).map(h => `
-        <tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:6px 8px;">${escHtml(h.remark || '未命名')}</td>
+        <tr style="border-bottom:1px solid #f0f0f0;"><td style="padding:6px 8px;">${escHtml(h.name || h.remark || h.platform || '未命名')}</td>
+        <td style="padding:6px 8px;">${escHtml(formatPlatform(h.platform))}</td>
         <td style="padding:6px 8px;color:#b2bec3;word-break:break-all;">${escHtml(h.url || '')}</td></tr>`).join('') ||
-        '<tr><td colspan="2" style="padding:8px;color:#b2bec3;">暂无 Webhook</td></tr>';
-    const pushRows = (d.recent_pushes || []).map(p => `
-        <tr style="border-bottom:1px solid #f0f0f0;font-size:12px;"><td style="padding:5px 8px;">${escHtml(p.ts||'')}</td>
-        <td style="padding:5px 8px;">${escHtml(p.channel_type||'')}</td>
-        <td style="padding:5px 8px;">${escHtml(p.status||'')}</td>
-        <td style="padding:5px 8px;color:#b2bec3;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(p.error_message||'')}</td></tr>`).join('') ||
-        '<tr><td colspan="4" style="padding:8px;color:#b2bec3;">暂无推送记录</td></tr>';
+        '<tr><td colspan="3" style="padding:8px;color:#b2bec3;">暂无 Webhook</td></tr>';
     document.getElementById('user-detail-title').textContent = `用户详情 - ${d.username}`;
     document.getElementById('user-detail-body').innerHTML = `
       <div class="settings-section" style="margin-bottom:12px;">
@@ -1800,17 +1886,10 @@ async function showUserDetail(userId) {
       </table>
       <h3 style="margin:12px 0 6px;font-size:14px;">Webhook（${(d.webhooks||[]).length}）</h3>
       <table class="history-table" style="width:100%;border-collapse:collapse;">
-        <thead><tr><th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">备注</th>
+        <thead><tr><th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">名称</th>
+        <th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">平台</th>
         <th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">地址</th></tr></thead>
         <tbody>${hookRows}</tbody>
-      </table>
-      <h3 style="margin:12px 0 6px;font-size:14px;">最近推送（${(d.recent_pushes||[]).length}）</h3>
-      <table class="history-table" style="width:100%;border-collapse:collapse;">
-        <thead><tr><th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">时间</th>
-        <th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">渠道</th>
-        <th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">状态</th>
-        <th style="text-align:left;padding:6px 8px;border-bottom:2px solid #e8eaed;">错误</th></tr></thead>
-        <tbody>${pushRows}</tbody>
       </table>`;
     openModal('user-detail-modal');
   } catch (e) { showAlert('加载详情失败: ' + e.message); }

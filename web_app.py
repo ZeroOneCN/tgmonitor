@@ -48,6 +48,8 @@ def default_config() -> dict:
         "webhooks": [
             {
                 "enabled": False,
+                "name": "",
+                "platform": "",
                 "telegram_bot_token": "",
                 "telegram_chat_id": "",
                 "url": "",
@@ -734,7 +736,7 @@ def wecom_upload_media(webhook_url: str, file_bytes: bytes, filename: str, file_
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=120) as resp:
             result = json.loads(resp.read().decode())
             if result.get("errcode") == 0:
                 return result.get("media_id"), None
@@ -1045,13 +1047,17 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                         logger.info(f"  Webhook [{idx}] 上传 {filename} (type={wecom_type}, size={file_size_mb:.2f}MB)")
                         mid = ""
                         err_msg = ""
-                        for _r in range(3):
-                            mid, err_msg = await asyncio.to_thread(wecom_upload_media, url, file_bytes, filename, wecom_type)
-                            if mid:
-                                break
-                            if _r < 2:
-                                await asyncio.sleep(2 ** _r)
-                        if err_msg:
+                        if file_size_mb > 20:
+                            err_msg = f"{filename} 超过企业微信上传上限20MB，跳过媒体上传（仅推送文字）"
+                            logger.warning(f"  Webhook [{idx}] {err_msg}")
+                        else:
+                            for _r in range(3):
+                                mid, err_msg = await asyncio.to_thread(wecom_upload_media, url, file_bytes, filename, wecom_type)
+                                if mid:
+                                    break
+                                if _r < 2:
+                                    await asyncio.sleep(2 ** _r)
+                        if err_msg and not mid:
                             logger.warning(f"  Webhook [{idx}] {err_msg}")
                         if mid:
                             ok2, err2 = False, "未尝试"
