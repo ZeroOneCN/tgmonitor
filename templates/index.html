@@ -61,6 +61,54 @@ nav { display: flex; gap: 2px; height: 100%; }
 .user-menu-item--danger { color: #e74c3c; }
 .user-menu-item--danger:hover { background: #fef0f0; }
 
+/* 连接状态灯 */
+.conn-status { display:flex; align-items:center; gap:6px; margin-right:14px; font-size:12px; color:#8a94a6; flex-shrink:0; }
+.conn-dot { width:9px; height:9px; border-radius:50%; background:#dcdde1; transition:background .3s, box-shadow .3s; }
+.conn-status.online .conn-dot { background:#2ecc71; box-shadow:0 0 0 3px rgba(46,204,113,.18); }
+.conn-status.offline .conn-dot { background:#e74c3c; box-shadow:0 0 0 3px rgba(231,76,60,.18); }
+.conn-status.reconnecting .conn-dot { background:#f1c40f; box-shadow:0 0 0 3px rgba(241,196,15,.2); animation:pulse 1.2s infinite; }
+@keyframes pulse { 50% { opacity:.4; } }
+
+/* 标签页未读角标 */
+.tab-btn { position: relative; }
+.tab-badge { position:absolute; top:7px; right:7px; min-width:17px; height:17px; padding:0 4px;
+  border-radius:9px; background:#e74c3c; color:#fff; font-size:11px; line-height:17px;
+  text-align:center; font-weight:600; box-shadow:0 1px 3px rgba(231,76,60,.4); }
+
+/* 迷你趋势图 */
+.sparkline { width:100%; height:44px; display:block; margin-top:12px; }
+
+/* 骨架屏 */
+.skeleton { position:relative; overflow:hidden; background:#eef1f5; border-radius:8px; }
+.skeleton::after { content:''; position:absolute; inset:0; transform:translateX(-100%);
+  background:linear-gradient(90deg, transparent, rgba(255,255,255,.6), transparent); animation:shimmer 1.3s infinite; }
+@keyframes shimmer { 100% { transform:translateX(100%); } }
+.skeleton-card { background:#fff; border-radius:12px; padding:18px; margin-bottom:14px; border:1px solid #eef0f4; }
+.skeleton-card .sk-line { height:14px; width:40%; }
+.skeleton-card .sk-line + .sk-line { margin-top:12px; width:78%; }
+.skeleton-card .sk-line.sk-wide { width:100%; }
+.skeleton-stat { height:92px; border-radius:12px; }
+
+/* Toast 轻提示 */
+#toast-container { position:fixed; top:18px; right:18px; z-index:300; display:flex; flex-direction:column; gap:10px; }
+.toast { min-width:220px; max-width:340px; padding:12px 16px; border-radius:10px; background:#fff;
+  box-shadow:0 6px 20px rgba(0,0,0,.14); border-left:4px solid #4A90D9; font-size:13px; color:#2d3436;
+  display:flex; align-items:center; gap:10px; animation:toastIn .25s ease; }
+.toast.success { border-left-color:#27ae60; }
+.toast.error { border-left-color:#e74c3c; }
+.toast.info { border-left-color:#4A90D9; }
+.toast.out { opacity:0; transform:translateX(12px); transition:all .3s; }
+@keyframes toastIn { from { opacity:0; transform:translateY(-10px); } to { opacity:1; transform:translateY(0); } }
+
+/* 按钮加载态 */
+.btn.loading { pointer-events:none; opacity:.7; }
+.spinner { display:inline-block; width:13px; height:13px; border:2px solid rgba(255,255,255,.5);
+  border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; vertical-align:-2px; margin-right:5px; }
+@keyframes spin { to { transform:rotate(360deg); } }
+
+/* 统计面板骨架 */
+.stats-grid.stats-loading .skeleton-stat { margin:0; }
+
 /* 主内容 - 铺满布局 */
 main { padding: 24px; width: 100%; }
 .tab-content { display: none; }
@@ -296,10 +344,14 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
     <button class="tab-btn active" onclick="switchTab('accounts')">账号管理</button>
     <button class="tab-btn" onclick="switchTab('stats')">数据统计</button>
     <button class="tab-btn" onclick="switchTab('history')">历史消息</button>
-    <button class="tab-btn" onclick="switchTab('logs')">实时日志</button>
+    <button class="tab-btn" onclick="switchTab('logs')">实时日志<span class="tab-badge" id="tab-badge-logs" style="display:none"></span></button>
     <button class="tab-btn" onclick="switchTab('settings')">系统设置</button>
     <button class="tab-btn" id="tab-btn-users" onclick="switchTab('users')" style="display:none;">用户管理</button>
   </nav>
+  <div class="conn-status" id="conn-status" title="服务连接状态">
+    <span class="conn-dot" id="conn-dot"></span>
+    <span class="conn-label" id="conn-label">连接中</span>
+  </div>
   <div class="user-menu-wrap" style="position:relative;flex-shrink:0;">
     <span id="current-user" class="user-menu-trigger" onclick="toggleUserMenu(event)"></span>
     <div id="user-menu" class="user-menu">
@@ -327,6 +379,7 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
         <h4>今日消息量</h4>
         <div class="value" id="stat-today-messages">-</div>
         <div class="sub" id="stat-today-messages-sub">加载中...</div>
+        <canvas class="sparkline" id="spark-today-messages" height="44"></canvas>
       </div>
       <div class="stat-card">
         <h4>推送成功率</h4>
@@ -406,7 +459,7 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
       <div id="webhook-list"></div>
       <button class="btn btn-outline btn-sm mt-8" onclick="addWebhookRow()">+ 添加一条 Webhook</button>
       <div class="modal-footer mt-8" style="border-top: 1px solid #e8eaed; padding-top: 16px;">
-        <button class="btn btn-primary" onclick="saveSettings()">保存设置</button>
+        <button class="btn btn-primary" id="save-settings-btn" onclick="saveSettings()">保存设置</button>
       </div>
     </div>
 
@@ -930,6 +983,47 @@ function closePrompt(ok) {
 }
 
 // ============================================================
+// 通用 UI 工具：全局状态 / Toast / 按钮加载态 / 骨架屏
+// ============================================================
+let currentTab = 'accounts';
+let logUnread = 0;
+
+function toast(message, type = 'info', duration = 2600) {
+  let c = document.getElementById('toast-container');
+  if (!c) { c = document.createElement('div'); c.id = 'toast-container'; document.body.appendChild(c); }
+  const el = document.createElement('div');
+  el.className = `toast ${type}`;
+  const icon = type === 'success' ? '✔' : type === 'error' ? '✖' : 'ℹ';
+  el.innerHTML = `<span style="flex-shrink:0;color:${type === 'success' ? '#27ae60' : type === 'error' ? '#e74c3c' : '#4A90D9'}">${icon}</span><span>${escHtml(message)}</span>`;
+  c.appendChild(el);
+  setTimeout(() => { el.classList.add('out'); setTimeout(() => el.remove(), 320); }, duration);
+}
+
+function setBtnLoading(btn, loading, label = '处理中...') {
+  if (!btn) return;
+  if (loading) {
+    if (!btn.dataset.origHtml) btn.dataset.origHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.classList.add('loading');
+    btn.innerHTML = `<span class="spinner"></span>${label}`;
+  } else {
+    btn.disabled = false;
+    btn.classList.remove('loading');
+    if (btn.dataset.origHtml) btn.innerHTML = btn.dataset.origHtml;
+  }
+}
+
+function renderSkeleton(container, count = 3, type = 'card') {
+  let html = '';
+  if (type === 'stat') {
+    html += `<div class="stat-card skeleton-stat"></div>`.repeat(count);
+  } else {
+    html += `<div class="account-card skeleton-card">${'<div class="sk-line"></div><div class="sk-line"></div>'.repeat(2)}<div class="sk-line sk-wide"></div></div>`.repeat(count);
+  }
+  container.innerHTML = html;
+}
+
+// ============================================================
 // Tab 切换
 // ============================================================
 function switchTab(name) {
@@ -938,6 +1032,8 @@ function switchTab(name) {
   const btn = document.querySelector(`.tab-btn[onclick*="${name}"]`);
   if (btn) btn.classList.add('active');
   document.getElementById(`tab-${name}`).classList.add('active');
+  currentTab = name;
+  if (name === 'logs') { logUnread = 0; updateLogBadge(); }
   if (name === 'accounts') loadAccounts();
   if (name === 'settings') loadSettings();
   if (name === 'stats') loadStats();
@@ -970,7 +1066,7 @@ async function api(method, url, body) {
 // ============================================================
 async function loadAccounts() {
   const el = document.getElementById('account-list');
-  el.innerHTML = '<div class="empty-state"><span class="icon">&#8987;</span>加载中...</div>';
+  renderSkeleton(el, 2, 'card');
   try {
     const accounts = await api('GET', '/api/accounts');
     if (accounts.length === 0) {
@@ -1681,6 +1777,8 @@ async function saveSettings() {
   }));
 
   try {
+    const btn = document.getElementById('save-settings-btn');
+    setBtnLoading(btn, true, '保存中...');
     const cleanup = {
       enabled: document.getElementById('cleanup-enabled').checked,
       keep_days: parseInt(document.getElementById('cleanup-days').value || '30', 10) || 30,
@@ -1689,9 +1787,11 @@ async function saveSettings() {
       webhooks,
       cleanup,
     });
-    showAlert('设置已保存');
+    setBtnLoading(btn, false);
+    toast('设置已保存', 'success');
   } catch (e) {
-    showAlert('保存失败: ' + e.message);
+    setBtnLoading(document.getElementById('save-settings-btn'), false);
+    toast('保存失败: ' + e.message, 'error');
   }
 }
 
@@ -1751,6 +1851,8 @@ async function changePassword() {
 function connectLogWs() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   const ws = new WebSocket(`${protocol}//${location.host}/ws/logs`);
+  setConnStatus('reconnecting');
+  ws.onopen = () => setConnStatus('online');
   ws.onmessage = (e) => {
     const output = document.getElementById('log-output');
     const cls = e.data.includes('[ERROR]') ? 'ERROR' : e.data.includes('[WARNING]') ? 'WARNING' : 'INFO';
@@ -1762,9 +1864,34 @@ function connectLogWs() {
       const container = document.getElementById('log-container');
       container.scrollTop = container.scrollHeight;
     }
+    // 未在实时日志页时累计未读角标
+    if (currentTab !== 'logs') {
+      logUnread += 1;
+      updateLogBadge();
+    }
   };
-  ws.onclose = () => { setTimeout(connectLogWs, 3000); };
+  ws.onclose = () => { setConnStatus('offline'); setTimeout(connectLogWs, 3000); };
   ws.onerror = () => ws.close();
+}
+
+function setConnStatus(state) {
+  const el = document.getElementById('conn-status');
+  if (!el) return;
+  el.classList.remove('online', 'offline', 'reconnecting');
+  el.classList.add(state);
+  const label = { online: '实时连接正常', offline: '连接断开，重连中', reconnecting: '连接中...' }[state] || '连接中';
+  document.getElementById('conn-label').textContent = label;
+}
+
+function updateLogBadge() {
+  const b = document.getElementById('tab-badge-logs');
+  if (!b) return;
+  if (logUnread > 0) {
+    b.style.display = '';
+    b.textContent = logUnread > 99 ? '99+' : logUnread;
+  } else {
+    b.style.display = 'none';
+  }
 }
 
 function clearLogs() {
@@ -2237,10 +2364,19 @@ let chartRuleHits = null;
 let chartChannelDist = null;
 
 async function loadStats() {
+  const statGrid = document.querySelector('.stats-grid');
+  const statCards = statGrid ? Array.from(statGrid.querySelectorAll('.stat-card')) : [];
+  const origHtml = new Map();
+  if (statCards.length) {
+    statCards.forEach(c => { origHtml.set(c, c.innerHTML); c.classList.add('skeleton'); c.innerHTML = ''; });
+    statGrid.classList.add('stats-loading');
+  }
   try {
     const res = await api('GET', '/api/stats');
     
     // 更新概览卡片
+    statCards.forEach(c => { c.classList.remove('skeleton'); c.innerHTML = origHtml.get(c); });
+
     document.getElementById('stat-today-messages').textContent = res.overview.today_messages || 0;
     document.getElementById('stat-today-messages-sub').textContent = `昨日: ${res.overview.yesterday_messages || 0}`;
     
@@ -2256,7 +2392,10 @@ async function loadStats() {
     
     document.getElementById('stat-monitored-chats').textContent = res.overview.monitored_chats || 0;
     document.getElementById('stat-monitored-chats-sub').textContent = '有消息的群组';
-    
+
+    // 今日消息量卡片：迷你趋势图（近7天）
+    drawSparkline('spark-today-messages', res.daily_messages || []);
+
     // 渲染图表
     renderDailyMessagesChart(res.daily_messages);
     renderAccountMessagesChart(res.account_messages);
@@ -2265,8 +2404,47 @@ async function loadStats() {
     renderRuleHitsChart(res.rule_hits || []);
     renderChannelDistChart(res.channel_distribution || []);
   } catch (e) {
+    if (statCards.length) statCards.forEach(c => { c.classList.remove('skeleton'); if (!c.innerHTML) c.innerHTML = '<div class="value" style="color:#e74c3c">错误</div>'; });
     console.error('加载统计数据失败:', e);
+  } finally {
+    if (statGrid) statGrid.classList.remove('stats-loading');
   }
+}
+
+function drawSparkline(canvasId, data) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas || !data || !data.length) return;
+  const vals = data.map(d => d.count || 0).slice(-7);
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || canvas.parentElement.clientWidth || 200;
+  const h = 44;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, w, h);
+  if (vals.length < 2) return;
+  const max = Math.max(...vals, 1);
+  const stepX = w / (vals.length - 1);
+  const points = vals.map((v, i) => [3 + i * stepX * 0.92, h - 5 - (v / max) * (h - 14)]);
+  // 渐变面积
+  ctx.beginPath();
+  ctx.moveTo(points[0][0], h - 2);
+  points.forEach(p => ctx.lineTo(p[0], p[1]));
+  ctx.lineTo(points[points.length - 1][0], h - 2);
+  ctx.closePath();
+  const grad = ctx.createLinearGradient(0, 0, 0, h);
+  grad.addColorStop(0, 'rgba(74,144,217,0.28)');
+  grad.addColorStop(1, 'rgba(74,144,217,0.02)');
+  ctx.fillStyle = grad; ctx.fill();
+  // 折线
+  ctx.beginPath();
+  points.forEach((p, i) => i ? ctx.lineTo(p[0], p[1]) : ctx.moveTo(p[0], p[1]));
+  ctx.strokeStyle = '#4A90D9'; ctx.lineWidth = 2; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.stroke();
+  // 端点
+  const last = points[points.length - 1];
+  ctx.beginPath(); ctx.arc(last[0], last[1], 3, 0, Math.PI * 2);
+  ctx.fillStyle = '#4A90D9'; ctx.fill();
 }
 
 function renderDailyMessagesChart(data) {
@@ -2281,19 +2459,29 @@ function renderDailyMessagesChart(data) {
         label: '消息量',
         data: data.map(d => d.count),
         borderColor: '#4A90D9',
-        backgroundColor: 'rgba(74, 144, 217, 0.1)',
-        tension: 0.3,
-        fill: true
+        backgroundColor: (c) => {
+          const { ctx: cctx, chartArea } = c.chart;
+          if (!chartArea) return 'rgba(74,144,217,0.12)';
+          const g = cctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+          g.addColorStop(0, 'rgba(74,144,217,0.35)');
+          g.addColorStop(1, 'rgba(74,144,217,0)');
+          return g;
+        },
+        tension: 0.35,
+        fill: true,
+        pointRadius: 3,
+        pointBackgroundColor: '#4A90D9',
+        pointHoverRadius: 5,
+        borderWidth: 2
       }]
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false }
-      },
+      plugins: { legend: { display: false } },
       scales: {
-        y: { beginAtZero: true }
+        y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' }, ticks: { color: '#8a94a6' } },
+        x: { grid: { display: false }, ticks: { color: '#8a94a6' } }
       }
     }
   });
@@ -2310,17 +2498,18 @@ function renderAccountMessagesChart(data) {
       datasets: [{
         label: '消息量',
         data: data.map(d => d.count),
-        backgroundColor: '#4A90D9'
+        backgroundColor: '#4A90D9',
+        borderRadius: 4,
+        maxBarThickness: 44
       }]
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false }
-      },
+      plugins: { legend: { display: false } },
       scales: {
-        y: { beginAtZero: true }
+        y: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' }, ticks: { color: '#8a94a6' } },
+        x: { grid: { display: false }, ticks: { color: '#8a94a6' } }
       }
     }
   });
@@ -2337,18 +2526,19 @@ function renderTopChatsChart(data) {
       datasets: [{
         label: '消息量',
         data: data.map(d => d.count),
-        backgroundColor: '#27ae60'
+        backgroundColor: '#27ae60',
+        borderRadius: 4,
+        maxBarThickness: 20
       }]
     },
     options: {
       indexAxis: 'y',
       responsive: true,
       maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false }
-      },
+      plugins: { legend: { display: false } },
       scales: {
-        x: { beginAtZero: true }
+        x: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' }, ticks: { color: '#8a94a6' } },
+        y: { grid: { display: false }, ticks: { color: '#2d3436' } }
       }
     }
   });
@@ -2364,14 +2554,16 @@ function renderPushSuccessChart(data) {
       labels: ['成功', '失败'],
       datasets: [{
         data: [data.success, data.failed],
-        backgroundColor: ['#27ae60', '#e74c3c']
+        backgroundColor: ['#27ae60', '#e74c3c'],
+        borderWidth: 1, borderColor: '#fff', hoverOffset: 4
       }]
     },
     options: {
       responsive: true,
       maintainAspectRatio: false,
+      cutout: '62%',
       plugins: {
-        legend: { position: 'bottom' }
+        legend: { position: 'bottom', labels: { usePointStyle: true, color: '#2d3436' } }
       }
     }
   });
@@ -2388,18 +2580,19 @@ function renderRuleHitsChart(data) {
       datasets: [{
         label: '命中次数',
         data: data.map(d => d.count),
-        backgroundColor: '#9b59b6'
+        backgroundColor: '#9b59b6',
+        borderRadius: 4,
+        maxBarThickness: 20
       }]
     },
     options: {
       indexAxis: 'y',
       responsive: true,
       maintainAspectRatio: false,
-      plugins: {
-        legend: { display: false }
-      },
+      plugins: { legend: { display: false } },
       scales: {
-        x: { beginAtZero: true }
+        x: { beginAtZero: true, grid: { color: 'rgba(0,0,0,0.05)' }, ticks: { color: '#8a94a6' } },
+        y: { grid: { display: false }, ticks: { color: '#2d3436' } }
       }
     }
   });
