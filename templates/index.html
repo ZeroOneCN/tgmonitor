@@ -106,6 +106,14 @@ nav { display: flex; gap: 2px; height: 100%; }
   border-top-color:#fff; border-radius:50%; animation:spin .7s linear infinite; vertical-align:-2px; margin-right:5px; }
 @keyframes spin { to { transform:rotate(360deg); } }
 
+/* 媒体预览弹窗 */
+.modal.media-modal { width:92%; max-width:920px; }
+.modal.media-modal h2 { font-size:15px; font-weight:600; margin-bottom:14px; }
+.modal.media-modal img, .modal.media-modal video { max-width:100%; max-height:78vh; border-radius:8px; box-shadow:0 2px 12px rgba(0,0,0,.1); }
+.modal.media-modal iframe { width:100%; height:72vh; border:1px solid #eef0f4; border-radius:8px; background:#fff; }
+.media-preview-link { cursor:pointer; color:#4A90D9; font-size:12px; padding:4px 8px; border-radius:6px; text-decoration:none; transition:background .15s; }
+.media-preview-link:hover { background:#f0f4ff; }
+
 /* 统计面板骨架 */
 .stats-grid.stats-loading .skeleton-stat { margin:0; }
 
@@ -623,6 +631,15 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
     </div>
   </div>
 
+  <!-- 媒体预览 模态框（图片/贴纸/GIF/视频/PDF） -->
+  <div class="modal-overlay" id="media-modal" onclick="if(event.target===this)closeModal('media-modal')">
+    <div class="modal media-modal">
+      <button class="modal-close" onclick="closeModal('media-modal')">&times;</button>
+      <h2 id="media-modal-title">媒体预览</h2>
+      <div id="media-modal-body" style="text-align:center;"></div>
+    </div>
+  </div>
+
   <!-- 历史消息 -->
   <section id="tab-history" class="tab-content">
     <div class="settings-section">
@@ -1045,6 +1062,28 @@ function switchTab(name) {
 // ============================================================
 function openModal(id) { document.getElementById(id).classList.add('active'); }
 function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+
+// 历史消息媒体预览：图片/贴纸/GIF/视频/PDF 均在本页弹窗打开
+function openMedia(type, path) {
+  const body = document.getElementById('media-modal-body');
+  const titleEl = document.getElementById('media-modal-title');
+  let inner = '';
+  if (type === 'video') {
+    titleEl.textContent = '视频预览';
+    inner = `<video controls autoplay src="${escHtml(path)}"></video>`;
+  } else if (type === 'document') {
+    titleEl.textContent = '文档预览';
+    // PDF 用浏览器内置查看器在线预览；其它文档类型回退为下载链接
+    inner = /\.pdf($|#|\?)/i.test(path)
+      ? `<iframe src="${escHtml(path)}#toolbar=1"></iframe>`
+      : `<div style="padding:40px 0;color:#8a94a6;">该类型暂不支持在线预览<br><a href="${escHtml(path)}" download style="color:#4A90D9;">&#128206; 点击下载</a></div>`;
+  } else {
+    titleEl.textContent = type === 'gif' ? 'GIF 预览' : '图片预览';
+    inner = `<img src="${escHtml(path)}" alt="图片">`;
+  }
+  body.innerHTML = inner;
+  openModal('media-modal');
+}
 
 // ============================================================
 // API 工具
@@ -2245,11 +2284,14 @@ async function loadHistory(page) {
       let mediaHtml = '';
       if (item.media_path) {
         if (item.media_type === 'image' || item.media_type === 'sticker' || item.media_type === 'gif') {
-          mediaHtml = `<div style="margin-top:8px;"><img src="${escHtml(item.media_path)}" alt="图片" style="max-width:100%;max-height:300px;border-radius:8px;border:1px solid #eee;cursor:pointer;" onclick="window.open('${escHtml(item.media_path)}','_blank')"></div>`;
+          mediaHtml = `<div style="margin-top:8px;"><img src="${escHtml(item.media_path)}" alt="图片" style="max-width:100%;max-height:300px;border-radius:8px;border:1px solid #eee;cursor:zoom-in;" onclick="openMedia('image','${escHtml(item.media_path)}')"></div>`;
         } else if (item.media_type === 'video') {
-          mediaHtml = `<div style="margin-top:8px;"><video controls src="${escHtml(item.media_path)}" style="max-width:100%;max-height:300px;border-radius:8px;"></video></div>`;
+          mediaHtml = `<div style="margin-top:8px;"><video controls src="${escHtml(item.media_path)}" style="max-width:100%;max-height:300px;border-radius:8px;cursor:pointer;" onclick="openMedia('video','${escHtml(item.media_path)}')"></video></div>`;
         } else {
-          mediaHtml = `<div style="margin-top:8px;"><a href="${escHtml(item.media_path)}" target="_blank" style="color:#4A90D9;font-size:12px;">&#128206; 下载文件</a></div>`;
+          mediaHtml = `<div style="margin-top:8px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+            <a href="${escHtml(item.media_path)}" download style="color:#4A90D9;font-size:12px;text-decoration:none;">&#128206; 下载文件</a>
+            <span class="media-preview-link" onclick="openMedia('document','${escHtml(item.media_path)}')">&#128065; 在线预览</span>
+          </div>`;
         }
       }
       return `
