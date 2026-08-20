@@ -216,16 +216,43 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
 ::-webkit-scrollbar-thumb { background: #d5d8dc; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #b2bec3; }
 
+/* 表格 */
+.history-table { width: 100%; border-collapse: collapse; }
+.history-table th {
+  text-align: left; padding: 10px 12px; border-bottom: 2px solid #e8eaed;
+  font-size: 13px; font-weight: 600; color: #2d3436; white-space: nowrap;
+}
+.history-table td {
+  padding: 10px 12px; border-bottom: 1px solid #f0f1f3; font-size: 13px;
+  vertical-align: middle;
+}
+.history-table tbody tr:hover { background: #f8fafc; }
+/* 表格横向滚动容器 */
+.table-scroll { overflow-x: auto; }
+
 /* 响应式 */
 @media (max-width: 640px) {
   header { flex-direction: column; height: auto; padding: 10px 16px; gap: 6px; }
-  nav { width: 100%; justify-content: center; }
-  .tab-btn { flex: 1; text-align: center; font-size: 13px; padding: 8px 4px; }
+  header h1 { font-size: 15px; }
+  nav { width: 100%; justify-content: center; flex-wrap: wrap; gap: 2px; }
+  .tab-btn { flex: 1 1 30%; text-align: center; font-size: 12px; padding: 8px 2px; }
   main { padding: 16px; }
   .account-header { flex-direction: column; align-items: flex-start; gap: 10px; }
   .account-actions { width: 100%; }
-  .modal { padding: 20px; width: 95vw; }
+  .modal { padding: 18px; width: 96vw; }
   .form-row { flex-direction: column; gap: 0; }
+  /* 宽表格在移动端横向滚动 */
+  .settings-section, .chart-container, .account-card, .stat-card, .modal {
+    overflow-x: auto;
+  }
+  .history-table { min-width: 640px; }
+}
+
+/* 超窄屏（<400px）进一步收紧 */
+@media (max-width: 400px) {
+  .stat-card { padding: 14px; }
+  .stat-card .value { font-size: 26px; }
+  .btn { padding: 6px 12px; font-size: 12px; }
 }
 </style>
 </head>

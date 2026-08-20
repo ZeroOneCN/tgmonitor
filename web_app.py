@@ -493,11 +493,19 @@ def init_history_db():
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         )
     """)
-    # 迁移：旧库补充 user_id 字段
+    # 迁移：旧库补充 push_logs 字段（channel_type/channel_index/retry_count/error_message/user_id）
     try:
         pcols = [r[1] for r in conn.execute("PRAGMA table_info(push_logs)").fetchall()]
-        if "user_id" not in pcols:
-            conn.execute("ALTER TABLE push_logs ADD COLUMN user_id INTEGER DEFAULT 0")
+        for col, ddl in (
+            ("channel_type", "channel_type TEXT NOT NULL DEFAULT ''"),
+            ("channel_index", "channel_index INTEGER NOT NULL DEFAULT 0"),
+            ("retry_count", "retry_count INTEGER DEFAULT 0"),
+            ("error_message", "error_message TEXT DEFAULT ''"),
+            ("user_id", "user_id INTEGER DEFAULT 0"),
+        ):
+            if col not in pcols:
+                conn.execute(f"ALTER TABLE push_logs ADD COLUMN {ddl}")
+        conn.commit()
     except Exception:
         pass
     
@@ -1901,19 +1909,31 @@ async def get_user_detail(user_id: int, request: Request):
     if user is None:
         return {"status": "error", "message": "用户不存在"}
     cfg = get_user_config(user)
-    # 最近推送
-    hist = sqlite3.connect(str(HISTORY_DB_PATH))
+    # 最近推送（表结构或数据异常时降级为空列表，避免详情页 500）
+    recent_pushes, recent_msgs = [], []
     try:
-        recent_pushes = [dict(r) for r in hist.execute(
-            "SELECT ts, account_name, channel_type, status, error_message FROM push_logs "
-            "WHERE user_id = ? ORDER BY id DESC LIMIT 20", (user_id,)
-        ).fetchall()]
-        recent_msgs = [dict(r) for r in hist.execute(
-            "SELECT ts, account_name, chat_title, text FROM history "
-            "WHERE user_id = ? ORDER BY id DESC LIMIT 20", (user_id,)
-        ).fetchall()]
+        hist = sqlite3.connect(str(HISTORY_DB_PATH))
+        try:
+            recent_pushes = [dict(r) for r in hist.execute(
+                "SELECT ts, account_name, channel_type, status, error_message FROM push_logs "
+                "WHERE user_id = ? ORDER BY id DESC LIMIT 20", (user_id,)
+            ).fetchall()]
+        except Exception:
+            recent_pushes = []
+        try:
+            recent_msgs = [dict(r) for r in hist.execute(
+                "SELECT ts, account_name, chat_title, text FROM history "
+                "WHERE user_id = ? ORDER BY id DESC LIMIT 20", (user_id,)
+            ).fetchall()]
+        except Exception:
+            recent_msgs = []
+    except Exception:
+        pass
     finally:
-        hist.close()
+        try:
+            hist.close()
+        except Exception:
+            pass
     return {
         "username": user["username"],
         "role": user["role"],
