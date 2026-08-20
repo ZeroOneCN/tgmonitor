@@ -1300,8 +1300,10 @@ def media_ext(msg, media_type: str) -> str:
 def format_alert(event, rule_remark, chat_title, sender_name, topic_name=""):
     msg = event.message
     text = msg.text or ""
-    if len(text) > 200:
-        text = text[:200] + "..."
+    # Telegram 单条消息上限 4096 字符；仅对极端超长消息做兜底截断，保留完整正文
+    MAX_TEXT = 3900
+    if len(text) > MAX_TEXT:
+        text = text[:MAX_TEXT] + " ..."
     mt = detect_media_type(msg)
     mt_cn = MEDIA_CN.get(mt, mt) if mt else ""
     title = "[Telegram 消息转发]"
