@@ -1022,7 +1022,9 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
                             file_bytes = compress_image(file_bytes)
                             filename = "telegram_compressed.jpg"
                     elif media_type == "video":
-                        wecom_type = "video"
+                        # 企业微信机器人不支持 video 类型上传（对 webm/sticker 常报 40004 invalid media type）
+                        # 统一按文件上传发送，避免失败
+                        wecom_type = "file"
                     else:
                         wecom_type = "file"
                     if not file_bytes:
