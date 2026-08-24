@@ -35,6 +35,22 @@ HISTORY_DB_PATH = BASE_DIR / "history.db"
 SHANGHAI_TZ = timezone(timedelta(hours=8))
 SESSION_SECRET = secrets.token_hex(32)
 
+# 进程启动时间，用于计算系统正常运行时间
+_PROCESS_START_TS = time.time()
+
+
+def _fmt_uptime(seconds: float) -> str:
+    """将秒数格式化为 天时.分.秒，如 2天03时25分12秒"""
+    seconds = int(seconds)
+    days, rem = divmod(seconds, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins, secs = divmod(rem, 60)
+    if days:
+        return f"{days}天{hours:02d}时{mins:02d}分{secs:02d}秒"
+    if hours:
+        return f"{hours:02d}时{mins:02d}分{secs:02d}秒"
+    return f"{mins:02d}分{secs:02d}秒"
+
 
 def default_config() -> dict:
     return {
@@ -1666,6 +1682,11 @@ class MonitorManager:
             if key in self.monitors:
                 del self.monitors[key]
 
+    def online_user_ids(self) -> set:
+        """当前所有在线用户 ID 集合"""
+        return {key[0] for key, m in self.monitors.items()
+                if m.running and m.client is not None and m.client.is_connected()}
+
 
 monitor_mgr = MonitorManager()
 
@@ -1806,11 +1827,9 @@ async def list_users(request: Request):
         rows = conn.execute(
             "SELECT id, username, role, banned, ban_reason, banned_at, created_at FROM users ORDER BY id"
         ).fetchall()
-        sessions = dict(conn.execute(
-            "SELECT user_id, COUNT(*) FROM sessions GROUP BY user_id"
-        ).fetchall())
     finally:
         conn.close()
+    online_ids = monitor_mgr.online_user_ids()
     result = []
     for row in rows:
         counters = _count_user_resources(row["id"])
@@ -1822,7 +1841,7 @@ async def list_users(request: Request):
             "ban_reason": row["ban_reason"],
             "banned_at": row["banned_at"],
             "created_at": row["created_at"],
-            "online": sessions.get(row["id"], 0) > 0,
+            "online": row["id"] in online_ids,
             **counters,
         })
     return result
@@ -1880,9 +1899,7 @@ async def admin_overview(request: Request):
     try:
         user_cnt = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         admin_cnt = conn.execute("SELECT COUNT(*) FROM users WHERE role='admin'").fetchone()[0]
-        online_cnt = conn.execute(
-            "SELECT COUNT(DISTINCT user_id) FROM sessions"
-        ).fetchone()[0]
+        online_cnt = len(monitor_mgr.online_user_ids())
         banned_cnt = conn.execute("SELECT COUNT(*) FROM users WHERE banned=1").fetchone()[0]
         rows = conn.execute("SELECT accounts, webhooks FROM users").fetchall()
     finally:
@@ -2808,6 +2825,7 @@ async def health(request: Request):
         "status": "ok",
         "time": datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S"),
         "running_monitors": running,
+        "uptime": _fmt_uptime(time.time() - _PROCESS_START_TS),
     }
 
 

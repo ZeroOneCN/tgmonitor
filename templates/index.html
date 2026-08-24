@@ -505,6 +505,10 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
           <label>状态</label>
           <div class="text-sm" id="health-status" style="line-height: 32px; color: #27ae60;">-</div>
         </div>
+        <div class="form-group">
+          <label>正常运行时间</label>
+          <div class="text-sm" id="health-uptime" style="line-height: 32px; color: #636e72;">-</div>
+        </div>
         <div class="form-group" style="margin-left: auto;">
           <button class="btn btn-outline btn-sm" onclick="checkHealth()">健康检查</button>
           <button class="btn btn-danger btn-sm" onclick="adminRestart()" id="admin-restart-btn">一键重启</button>
@@ -2191,6 +2195,8 @@ async function checkHealth() {
     document.getElementById('health-status').textContent = h.status === 'ok'
       ? `正常（运行中监控：${h.running_monitors}）` : '异常';
     document.getElementById('health-status').style.color = h.status === 'ok' ? '#27ae60' : '#e74c3c';
+    const up = document.getElementById('health-uptime');
+    if (up) up.textContent = h.uptime || '-';
   } catch (e) {
     document.getElementById('health-time').textContent = new Date().toLocaleString('zh-CN');
     document.getElementById('health-status').textContent = '无法连接';
