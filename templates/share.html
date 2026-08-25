@@ -180,6 +180,17 @@ function escHtml(s) {
     '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
   }[c]));
 }
+function linkifyUrls(s) {
+  // 把文本中的 URL 转成可点击超链接；s 应为已 escape 后的 HTML 字符串
+  if (!s) return s;
+  const re = /(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+/g;
+  return s.replace(re, function(m) {
+    let cleaned = m.replace(/[.,;:!?。，；：！？、）】》"'”]+$/, '');
+    if (!cleaned) return m;
+    const href = /^https?:\/\//i.test(cleaned) ? cleaned : 'http://' + cleaned;
+    return '<a href="' + href + '" target="_blank" rel="noopener noreferrer" style="color:#5bc0de;text-decoration:underline;word-break:break-all;">' + cleaned + '</a>' + m.slice(cleaned.length);
+  });
+}
 function openMedia(type, path) {
   const body = document.getElementById('media-body');
   if (type === 'video') body.innerHTML = `<video controls autoplay src="${escHtml(path)}"></video>`;
@@ -218,7 +229,7 @@ function msgHtml(item, isNew) {
         ${topic}${sender}${rule}
         <span class="msg-time">${escHtml(item.ts)}</span>
       </div>
-      ${item.text ? `<div class="msg-text">${escHtml(item.text)}</div>` : ''}
+      ${item.text ? `<div class="msg-text">${linkifyUrls(escHtml(item.text))}</div>` : ''}
       ${mediaThumb(item)}
     </div>`;
 }

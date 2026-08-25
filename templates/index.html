@@ -161,9 +161,10 @@ main { padding: 24px; width: 100%; }
 .account-card:hover { box-shadow: 0 6px 18px rgba(0,0,0,0.08); }
 .account-header {
   display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px;
+  flex-wrap: wrap; gap: 10px;
 }
-.account-left { display: flex; align-items: center; gap: 12px; }
-.account-name { font-size: 16px; font-weight: 600; color: #2d3436; }
+.account-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.account-name { font-size: 16px; font-weight: 600; color: #2d3436; overflow-wrap: anywhere; }
 .account-name .phone { font-weight: 400; font-size: 13px; color: #b2bec3; margin-left: 8px; }
 .status-badge {
   display: inline-block; padding: 3px 10px; border-radius: 12px; font-size: 12px; font-weight: 500;
@@ -172,7 +173,8 @@ main { padding: 24px; width: 100%; }
 .status-stopped { background: #f3e5f5; color: #7b1fa2; }
 .status-loggedin { background: #e3f2fd; color: #1565c0; }
 .status-nosession { background: #fff3e0; color: #e65100; }
-.account-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.account-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-left: auto; }
+.account-actions .btn { padding: 6px 12px; white-space: nowrap; }
 .account-body { margin-top: 12px; }
 .proxy-info { font-size: 13px; color: #636e72; margin-bottom: 10px; }
 
@@ -221,15 +223,16 @@ main { padding: 24px; width: 100%; }
 /* 双栏布局：系统设置/账号管理 */
 .settings-grid {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 16px; align-items: start;
+  gap: 16px; align-items: stretch;
 }
-.settings-grid .settings-section { margin-bottom: 0; }
+.settings-grid .settings-section { margin-bottom: 0; display: flex; flex-direction: column; }
 .settings-grid .span-2 { grid-column: 1 / -1; }
 #account-list {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
-  gap: 14px; align-items: start;
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px; align-items: stretch;
 }
-#account-list .account-card { margin-bottom: 0; height: 100%; }
+#account-list .account-card { margin-bottom: 0; height: 100%; display: flex; flex-direction: column; }
+#account-list .account-card > :last-child { margin-top: auto; }
 
 /* 日志区域 */
 #log-container {
@@ -1277,6 +1280,18 @@ function ruleDetail(rule) {
 function escHtml(s) {
   if (s == null) return '';
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function linkifyUrls(s) {
+  // 把文本中的 URL 转成可点击超链接；s 应为已 escape 后的 HTML 字符串
+  if (!s) return s;
+  const re = /(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+/g;
+  return s.replace(re, function(m) {
+    let cleaned = m.replace(/[.,;:!?。，；：！？、）】》"'”]+$/, '');
+    if (!cleaned) return m;
+    const href = /^https?:\/\//i.test(cleaned) ? cleaned : 'http://' + cleaned;
+    return '<a href="' + href + '" target="_blank" rel="noopener noreferrer" style="color:#4A90D9;text-decoration:underline;word-break:break-all;">' + cleaned + '</a>' + m.slice(cleaned.length);
+  });
 }
 
 function formatPlatform(p) {
@@ -2487,7 +2502,7 @@ async function loadHistory(page) {
           <div style="margin-top:6px;font-size:13px;color:#2d3436;display:flex;align-items:center;gap:6px;">
             <span style="color:#b2bec3;font-size:12px;">${highlightKw(item.sender_name, keyword)}</span>
             <span style="color:#b2bec3;">:</span>
-            <span style="word-break:break-all;">${highlightKw(item.text || '(无文本)', keyword)}</span>
+            <span style="word-break:break-all;">${linkifyUrls(highlightKw(item.text || '(无文本)', keyword))}</span>
             ${mediaIcon ? `<span style="font-size:16px;" title="${item.media_type}">${mediaIcon}</span>` : ''}
           </div>
           ${mediaHtml}
