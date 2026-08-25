@@ -7,6 +7,8 @@ Telegram 多账号监控工具 - Web 管理后台 (FastAPI)
 
 import asyncio
 import csv
+import hashlib
+import hmac
 import io
 import json
 import logging
@@ -35,6 +37,22 @@ CONFIG_PATH = BASE_DIR / "config.json"
 HISTORY_DB_PATH = BASE_DIR / "history.db"
 SHANGHAI_TZ = timezone(timedelta(hours=8))
 SESSION_SECRET = secrets.token_hex(32)
+
+# 分享页访问鉴权（可选密码）：用 HMAC 签发一次性访问令牌
+SHARE_AUTH_SECRET = "tgmonitor-share-auth-v1"
+
+
+def _share_sign(token: str, password: str) -> str:
+    """对 token+密码 做 HMAC 签名"""
+    return hmac.new(SHARE_AUTH_SECRET.encode(), f"{token}:{password}".encode(), hashlib.sha256).hexdigest()
+
+
+def _share_auth_valid(token: str, sharing: dict, auth: str = "") -> bool:
+    """校验分享页访问凭据：未设密码则放行；设了密码须 auth 匹配"""
+    pwd = sharing.get("password", "") or ""
+    if not pwd:
+        return True
+    return bool(auth) and hmac.compare_digest(auth, f"{token}.{_share_sign(token, pwd)}")
 
 # 进程启动时间，用于计算系统正常运行时间
 _PROCESS_START_TS = time.time()
@@ -384,10 +402,10 @@ def get_user_config(row) -> dict:
     """把 users 行的业务配置字段解析为 dict"""
     if row is None:
         cfg = default_config()
-        cfg["sharing"] = {"enabled": False, "token": "", "filter_type": "all", "filter_ids": []}
+        cfg["sharing"] = {"enabled": False, "token": "", "password": "", "filter_type": "all", "filter_ids": []}
         return cfg
     sharing = json.loads(row["sharing"] or "{}")
-    sharing = {**{"enabled": False, "token": "", "filter_type": "all", "filter_ids": []}, **sharing}
+    sharing = {**{"enabled": False, "token": "", "password": "", "filter_type": "all", "filter_ids": []}, **sharing}
     return {
         "accounts": json.loads(row["accounts"] or "[]"),
         "webhooks": json.loads(row["webhooks"] or "[]"),
@@ -1687,8 +1705,16 @@ class AsyncMonitor:
                 if topic_id and chat_id is not None:
                     topic_name = await self.resolve_topic_name(chat_id, topic_id)
                 edit_time = ""
-                if getattr(msg, "edit_date", None):
-                    edit_time = datetime.fromtimestamp(msg.edit_date, tz=SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                ed = getattr(msg, "edit_date", None)
+                if ed:
+                    try:
+                        if isinstance(ed, datetime):
+                            # 部分版本 telethon edit_date 直接返回 datetime
+                            edit_time = ed.astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                        else:
+                            edit_time = datetime.fromtimestamp(ed, tz=SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        edit_time = str(ed)
                 for rule in rules:
                     if not (chat_matches(chat_id, chat_title, rule) and user_matches(sender_id, sender_username, rule)
                             and keyword_matches(text, rule) and topic_matches(topic_id, topic_name, rule)):
@@ -3097,12 +3123,86 @@ def update_sharing(request: Request, data: dict):
     if enabled and not sharing.get("token"):
         sharing["token"] = secrets.token_urlsafe(32)
     sharing["enabled"] = enabled
+    # password：可选，为空串表示不验证密码（仅随机链接）
+    if "password" in data:
+        sharing["password"] = str(data.get("password", "")).strip()
     sharing["filter_type"] = str(data.get("filter_type", sharing.get("filter_type", "all")))
     sharing["filter_ids"] = data.get("filter_ids", sharing.get("filter_ids", []))
     cfg["sharing"] = sharing
     save_user_config(user_id, cfg)
     logger.info(f"[user={user_id}] 已更新分享配置: enabled={sharing['enabled']} filter_type={sharing['filter_type']}")
     return {"status": "ok", "sharing": sharing}
+
+
+def _share_query_messages(user_id: int, sharing: dict, before_id: int = 0, limit: int = 200, max_scan: int = 600):
+    """按分享过滤拉取历史消息；返回 (时间正序 items, 最早一条的 id)"""
+    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    try:
+        if before_id and before_id > 0:
+            rows = conn.execute(
+                "SELECT id, ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, "
+                "has_media, media_type, media_path, rule_remark, topic_id, topic_name "
+                "FROM history WHERE user_id=? AND id<? ORDER BY id DESC LIMIT ?",
+                (user_id, before_id, max_scan)).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT id, ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, "
+                "has_media, media_type, media_path, rule_remark, topic_id, topic_name "
+                "FROM history WHERE user_id=? ORDER BY id DESC LIMIT ?",
+                (user_id, max_scan)).fetchall()
+    finally:
+        conn.close()
+    items = []
+    for r in rows:
+        if len(items) >= limit:
+            break
+        if _share_should_pass(sharing, r[5], r[12]):
+            items.append(share_payload_for_row(r))
+    items.reverse()  # 时间正序（旧→新）
+    oldest_id = items[0]["id"] if items else None
+    return items, oldest_id
+
+
+@app.get("/api/share/meta/{token}")
+def share_meta(token: str):
+    """分享页元信息：是否需要密码（页面据此先出密码输入框）"""
+    user_id = _resolve_share_token(token)
+    if user_id is None:
+        raise HTTPException(404, "链接无效或分享未开启")
+    user = get_user_by_id(user_id)
+    sharing = json.loads(user["sharing"] or "{}")
+    return {"need_password": bool(sharing.get("password", "")), "enabled": sharing.get("enabled", False)}
+
+
+@app.post("/api/share/auth")
+def share_auth(data: dict):
+    """校验分享密码，返回访问令牌（无密码时也返回，便于统一流程）"""
+    token = str(data.get("token", ""))
+    password = str(data.get("password", ""))
+    user_id = _resolve_share_token(token)
+    if user_id is None:
+        raise HTTPException(403, "链接无效或分享未开启")
+    user = get_user_by_id(user_id)
+    sharing = json.loads(user["sharing"] or "{}")
+    pwd = sharing.get("password", "") or ""
+    if pwd and not hmac.compare_digest(pwd, password):
+        raise HTTPException(403, "密码错误")
+    return {"auth_token": f"{token}.{_share_sign(token, pwd)}"}
+
+
+@app.get("/api/share/history/{token}")
+def share_history(token: str, auth: str = "", before_id: int = 0, limit: int = 50):
+    """分享页加载更多历史消息（翻页）；设了密码须带有效 auth"""
+    user_id = _resolve_share_token(token)
+    if user_id is None:
+        raise HTTPException(404, "链接无效或分享未开启")
+    user = get_user_by_id(user_id)
+    sharing = json.loads(user["sharing"] or "{}")
+    if not _share_auth_valid(token, sharing, auth):
+        raise HTTPException(403, "访问受限或密码错误")
+    limit = max(1, min(int(limit), 200))
+    items, oldest_id = _share_query_messages(user_id, sharing, int(before_id) if before_id else 0, limit)
+    return {"items": items, "oldest_id": oldest_id}
 
 
 @app.get("/share/{token}", response_class=HTMLResponse)
@@ -3122,21 +3222,16 @@ async def ws_share(websocket: WebSocket, token: str):
     if user_id is None:
         await websocket.close(code=1008)
         return
+    user = get_user_by_id(user_id)
+    sharing = json.loads(user["sharing"] or "{}")
+    auth_q = (websocket.query_params.get("auth") or "")
+    if not _share_auth_valid(token, sharing, auth_q):
+        await websocket.close(code=1008)
+        return
     await share_hub.add(token, websocket)
     try:
-        # 首次连接推送最近的历史消息（按分享过滤），之后靠 ShareHub 实时推送
-        user = get_user_by_id(user_id)
-        sharing = json.loads(user["sharing"] or "{}")
-        conn = sqlite3.connect(str(HISTORY_DB_PATH))
-        rows = conn.execute(
-            "SELECT id, ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, "
-            "has_media, media_type, media_path, rule_remark, topic_id, topic_name "
-            "FROM history WHERE user_id=? ORDER BY id DESC LIMIT 50",
-            (user_id,)
-        ).fetchall()
-        conn.close()
-        items = [share_payload_for_row(r) for r in rows if _share_should_pass(sharing, r[5], r[12])]
-        items.reverse()  # 时间序展示
+        # 首次连接推送最近的历史消息（按分享过滤，最多 200 条），之后靠 ShareHub 实时推送
+        items, _ = _share_query_messages(user_id, sharing, 0, 200)
         await websocket.send_text(json.dumps({"type": "init", "items": items}, ensure_ascii=False))
     except Exception:
         pass

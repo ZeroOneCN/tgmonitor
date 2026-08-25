@@ -218,6 +218,19 @@ main { padding: 24px; width: 100%; }
 .btn-outline-sm:hover { border-color: #4A90D9; color: #4A90D9; }
 .toolbar { margin-bottom: 16px; display: flex; gap: 8px; flex-wrap: wrap; }
 
+/* 双栏布局：系统设置/账号管理 */
+.settings-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px; align-items: start;
+}
+.settings-grid .settings-section { margin-bottom: 0; }
+.settings-grid .span-2 { grid-column: 1 / -1; }
+#account-list {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr));
+  gap: 14px; align-items: start;
+}
+#account-list .account-card { margin-bottom: 0; height: 100%; }
+
 /* 日志区域 */
 #log-container {
   background: #fff; border-radius: 10px; padding: 16px; height: 500px;
@@ -333,6 +346,8 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
   .settings-section, .chart-container, .account-card, .stat-card, .modal {
     overflow-x: auto;
   }
+  .settings-grid { grid-template-columns: 1fr; }
+  #account-list { grid-template-columns: 1fr; }
   .history-table { min-width: 640px; }
 }
 
@@ -461,7 +476,8 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
 
   <!-- 设置 -->
   <section id="tab-settings" class="tab-content">
-    <div class="settings-section">
+    <div class="settings-grid">
+    <div class="settings-section span-2">
       <h3>Webhook 推送设置</h3>
       <p class="text-sm mb-8">匹配到消息时通过 Webhook 发送通知到手机，两种方式可选（填其中一种即可）。</p>
       <div id="webhook-list"></div>
@@ -537,6 +553,11 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
         </div>
       </div>
 
+      <div style="margin-top: 12px;">
+        <label>访问密码 <span class="hint">可选：填写后对方打开链接需输入密码才能查看；留空则仅凭链接访问</span></label>
+        <input class="form-control" id="share-password" type="password" placeholder="不设置密码则留空" style="width: 260px;" autocomplete="new-password">
+      </div>
+
       <div style="margin-top: 16px;">
         <button class="btn btn-primary btn-sm" onclick="saveSharing()">保存分享设置</button>
       </div>
@@ -563,6 +584,7 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
           <button class="btn btn-danger btn-sm" onclick="adminRestart()" id="admin-restart-btn">一键重启</button>
         </div>
       </div>
+    </div>
     </div>
   </section>
 
@@ -1945,6 +1967,7 @@ async function loadSharing() {
     shareCurrentToken = cfg.token || '';
     document.getElementById('share-enabled').checked = !!cfg.enabled;
     document.getElementById('share-filter-type').value = cfg.filter_type || 'all';
+    document.getElementById('share-password').value = cfg.password || '';
     renderShareFilterOptions(cfg.filter_ids);
     updateShareLinkUI(cfg);
   } catch (e) { console.error('加载分享配置失败:', e); }
@@ -1955,6 +1978,7 @@ async function saveSharing() {
     enabled: document.getElementById('share-enabled').checked,
     filter_type: document.getElementById('share-filter-type').value,
     filter_ids: currentShareFilterIds(),
+    password: document.getElementById('share-password').value.trim(),
   };
   try {
     const d = await api('PUT', '/api/sharing', payload);

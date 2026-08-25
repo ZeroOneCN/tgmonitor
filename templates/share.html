@@ -25,11 +25,18 @@
   .dot.off { background: #e74c3c; }
   .status { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
   .count { font-size: 12px; color: var(--muted); }
+  .icon-btn {
+    background: transparent; border: 1px solid var(--border); color: var(--text);
+    padding: 6px 12px; border-radius: 8px; cursor: pointer; font-size: 13px;
+  }
+  .icon-btn.on { border-color: var(--accent); color: var(--accent); }
   main { max-width: 760px; margin: 0 auto; padding: 16px 16px 40px; }
   .msg {
     background: var(--card); border: 1px solid var(--border);
     border-radius: 10px; padding: 12px 14px; margin-bottom: 10px;
   }
+  .msg.new { animation: flash 1.5s ease; }
+  @keyframes flash { 0%{background: rgba(34,158,217,.18);} 100%{background: var(--card);} }
   .msg-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
   .msg-chat { font-weight: 600; font-size: 14px; color: var(--accent); }
   .msg-topic { font-size: 12px; color: #8e6fd8; }
@@ -46,13 +53,37 @@
   }
   .msg-file:hover { border-color: var(--accent); }
   .empty { text-align: center; color: var(--muted); padding: 60px 20px; line-height: 1.8; }
-  .footer-note { text-align: center; color: var(--muted); font-size: 12px; margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--border); }
-  /* 模态框 */
+  .load-more-wrap { text-align: center; margin: 16px 0; }
+  #load-more-btn {
+    background: transparent; border: 1px dashed var(--border); color: var(--muted);
+    padding: 10px 24px; border-radius: 8px; cursor: pointer; font-size: 13px; width: 100%;
+  }
+  #load-more-btn:hover { color: var(--accent); border-color: var(--accent); }
+  #load-more-btn:disabled { opacity: .4; cursor: default; }
+  .footer-note { text-align: center; color: var(--muted); font-size: 12px; margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--border);}
+  /* 模态框（密码锁 / 媒体预览） */
   .modal-mask {
     display: none; position: fixed; inset: 0; background: rgba(0,0,0,.82); z-index: 100;
     align-items: center; justify-content: center; padding: 20px;
   }
   .modal-mask.active { display: flex; }
+  .lock-box {
+    background: var(--card); border: 1px solid var(--border); border-radius: 14px;
+    padding: 30px; width: 340px; max-width: 92vw; text-align: center;
+  }
+  .lock-box h2 { font-size: 17px; margin-bottom: 6px; }
+  .lock-box p { font-size: 13px; color: var(--muted); margin-bottom: 16px; }
+  .lock-box input {
+    width: 100%; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--bg); color: var(--text); font-size: 15px; text-align: center; outline: none;
+  }
+  .lock-box input:focus { border-color: var(--accent); }
+  .lock-box .err { color: #e74c3c; font-size: 12px; margin-top: 8px; min-height: 16px; }
+  .lock-box button {
+    width: 100%; margin-top: 14px; padding: 10px; border: none; border-radius: 8px;
+    background: var(--accent); color: #fff; font-size: 15px; cursor: pointer;
+  }
+  .lock-box button:hover { filter: brightness(1.08); }
   .modal-box { max-width: 92vw; max-height: 92vh; position: relative; }
   .modal-box img, .modal-box video { max-width: 92vw; max-height: 88vh; border-radius: 8px; }
   .modal-close {
@@ -63,6 +94,7 @@
 <body>
 <header>
   <h1>&#128172; 消息分享</h1>
+  <button class="icon-btn" id="notify-btn" onclick="toggleNotify()">&#128276; 提醒: 关</button>
   <span class="count" id="count">0 条</span>
   <span class="status"><span class="dot" id="dot"></span><span id="status-text">连接中...</span></span>
 </header>
@@ -73,8 +105,22 @@
     <div style="font-size:40px;margin-bottom:12px;">&#128172;</div>
     暂无消息<br><span style="font-size:13px;">实时监听中，新的匹配消息会立即显示在这里</span>
   </div>
+  <div class="load-more-wrap">
+    <button id="load-more-btn" onclick="loadMore()" style="display:none;">&#8593; 加载更多历史消息</button>
+  </div>
   <div class="footer-note">本页面仅用于查看，由分享者配置与管理</div>
 </main>
+
+<!-- 密码锁模态框 -->
+<div class="modal-mask" id="lock-mask">
+  <div class="lock-box">
+    <h2>&#128274; 需要密码</h2>
+    <p>该分享设置了访问密码，请输入后查看</p>
+    <input type="password" id="lock-pwd" placeholder="请输入密码" autocomplete="off">
+    <div class="err" id="lock-err"></div>
+    <button onclick="doUnlock()">进入</button>
+  </div>
+</div>
 
 <!-- 媒体预览模态框 -->
 <div class="modal-mask" id="media-mask" onclick="if(event.target===this)closeMedia()">
@@ -86,14 +132,54 @@
 
 <script>
 const TOKEN = (window.location.pathname.match(/\/share\/([^/?#]+)/) || [])[1] || '';
-let count = 0;
+const TITLE = '消息分享';
+let items = [];          // 时间正序（旧→新）
+let oldestId = null;     // 最早一条消息 id，用于加载更多
+let authToken = '';
+let unread = 0;
+const notifyOn = localStorage.getItem('share_notify') === '1';
+if (notifyOn) document.getElementById('notify-btn').classList.add('on');
+
+let _beepCtx = null;
+function beep() {
+  try {
+    const C = window.AudioContext || window.webkitAudioContext;
+    if (!C) return;
+    _beepCtx = _beepCtx || new C();
+    if (_beepCtx.state === 'suspended') _beepCtx.resume();
+    const o = _beepCtx.createOscillator(), g = _beepCtx.createGain();
+    o.connect(g); g.connect(_beepCtx.destination);
+    o.frequency.value = 880; g.gain.value = 0.06;
+    o.start();
+    g.gain.exponentialRampToValueAtTime(0.0001, _beepCtx.currentTime + 0.2);
+    o.stop(_beepCtx.currentTime + 0.2);
+  } catch (e) {}
+}
+function notify(item) {
+  beep();
+  if (notifyOn && 'Notification' in window && Notification.permission === 'granted') {
+    try { new Notification((item.chat_title || '消息分享'), { body: (item.text || '').slice(0, 80) || '（含媒体）' }); } catch (e) {}
+  }
+  if (document.hidden) { unread += 1; document.title = `(${unread}) ${TITLE}`; }
+}
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { unread = 0; document.title = TITLE; }
+});
+function toggleNotify() {
+  const on = !notifyOn;
+  localStorage.setItem('share_notify', on ? '1' : '0');
+  location.reload();
+}
+// 首次进入时若开启过提醒则申请权限
+if (notifyOn && 'Notification' in window && Notification.permission === 'default') {
+  Notification.requestPermission();
+}
 
 function escHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
     '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
   }[c]));
 }
-
 function openMedia(type, path) {
   const body = document.getElementById('media-body');
   if (type === 'video') body.innerHTML = `<video controls autoplay src="${escHtml(path)}"></video>`;
@@ -119,73 +205,127 @@ function mediaThumb(item) {
     return `<div class="msg-media"><a class="msg-file" href="${escHtml(p)}" download>&#128206; 文档下载</a>
             &nbsp;<a class="msg-file" href="javascript:void(0)" onclick="openMedia('document','${escHtml(p)}')">&#128065; 在线预览</a></div>`;
   }
-  return ''; // audio/photo 文件等仅兜底链接
+  return '';
 }
-
-function msgHtml(item) {
+function msgHtml(item, isNew) {
   const topic = item.topic_name ? `\u2022 <span class="msg-topic">${escHtml(item.topic_name)}</span>` : '';
   const sender = item.sender_name ? `<span class="msg-sender">${escHtml(item.sender_name)}</span>` : '';
   const rule = item.rule_remark ? `<span class="msg-rule">${escHtml(item.rule_remark)}</span>` : '';
   return `
-    <div class="msg">
+    <div class="msg${isNew ? ' new' : ''}">
       <div class="msg-head">
         <span class="msg-chat">${escHtml(item.chat_title || item.chat_id || '未知群组')}</span>
-        ${topic}${sender}
-        ${rule}
+        ${topic}${sender}${rule}
         <span class="msg-time">${escHtml(item.ts)}</span>
       </div>
       ${item.text ? `<div class="msg-text">${escHtml(item.text)}</div>` : ''}
       ${mediaThumb(item)}
     </div>`;
 }
-
-function render(items) {
-  // items 时间正序（旧→新），展示为最新在上
-  const list = document.getElementById('list');
-  list.innerHTML = items.slice().reverse().map(msgHtml).join('');
-  count = items.length;
-  document.getElementById('count').textContent = count + ' 条';
-  document.getElementById('empty').style.display = items.length ? 'none' : 'block';
+function render(list) {
+  const container = document.getElementById('list');
+  container.innerHTML = list.slice().reverse().map((m, i) => msgHtml(m, false)).join('');
+  updateListState();
 }
-
+function updateListState() {
+  document.getElementById('count').textContent = items.length + ' 条';
+  document.getElementById('empty').style.display = items.length ? 'none' : 'block';
+  document.getElementById('load-more-btn').style.display = oldestId ? 'block' : 'none';
+}
+function prepend(item) {
+  items.push(item);
+  document.getElementById('list').insertAdjacentHTML('afterbegin', msgHtml(item, true));
+  updateListState();
+  notify(item);
+}
 function setStatus(cls, text) {
-  const dot = document.getElementById('dot');
-  dot.className = 'dot ' + cls;
+  document.getElementById('dot').className = 'dot ' + cls;
   document.getElementById('status-text').textContent = text;
 }
 
-function prepend(item) {
-  document.getElementById('list').insertAdjacentHTML('afterbegin', msgHtml(item));
-  count += 1;
-  document.getElementById('count').textContent = count + ' 条';
-  document.getElementById('empty').style.display = 'none';
-  // 置顶提示轻微高亮
-  const first = document.getElementById('list').firstElementChild;
-  if (first) { first.style.transition = 'background .6s'; first.style.background = 'rgba(34,158,217,.12)'; setTimeout(() => first.style.background = '', 1500); }
+async function loadMore() {
+  const btn = document.getElementById('load-more-btn');
+  if (!oldestId || btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = '加载中...';
+  try {
+    const res = await fetch(`/api/share/history/${encodeURIComponent(TOKEN)}?auth=${encodeURIComponent(authToken)}&before_id=${oldestId}&limit=50`);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const d = await res.json();
+    const more = d.items || [];
+    // 新的历史消息（更旧）追加到最底部
+    document.getElementById('list').insertAdjacentHTML('beforeend', more.map(m => msgHtml(m, false)).join(''));
+    items = more.concat(items);
+    oldestId = d.oldest_id || null;
+    updateListState();
+  } catch (e) { console.error('加载更多失败', e); }
+  finally {
+    btn.disabled = false;
+    btn.textContent = '\u2191 加载更多历史消息';
+  }
 }
 
-let ws, items = [], reconnectDelay = 1000;
-
+// ---- 鉴权流程：meta → (密码锁) → auth → 连接 WS ----
+let ws = null, reconnectDelay = 1000;
 function connect() {
-  if (!TOKEN) { setStatus('off', '链接无效'); return; }
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  ws = new WebSocket(`${protocol}//${location.host}/ws/share/${encodeURIComponent(TOKEN)}`);
+  ws = new WebSocket(`${protocol}//${location.host}/ws/share/${encodeURIComponent(TOKEN)}?auth=${encodeURIComponent(authToken)}`);
   ws.onopen = () => { setStatus('on', '已连接'); reconnectDelay = 1000; };
-  ws.onclose = () => {
-    setStatus('off', '已断开，重连中...');
-    setTimeout(connect, reconnectDelay);
-    reconnectDelay = Math.min(reconnectDelay * 2, 15000);
-  };
+  ws.onclose = () => { setStatus('off', '已断开，重连中...'); setTimeout(connect, reconnectDelay); reconnectDelay = Math.min(reconnectDelay * 2, 15000); };
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
     let data;
     try { data = JSON.parse(e.data); } catch { return; }
-    if (data.type === 'init') { items = data.items || []; render(items); }
-    else if (data.type === 'new') { items.push(data.item); prepend(data.item); }
+    if (data.type === 'init') { items = data.items || []; oldestId = (items[0] && items[0].id) || null; render(items); }
+    else if (data.type === 'new') { prepend(data.item); }
   };
 }
 
-connect();
+async function doUnlock() {
+  const pwd = document.getElementById('lock-pwd').value.trim();
+  const errEl = document.getElementById('lock-err');
+  errEl.textContent = '';
+  try {
+    const res = await fetch('/api/share/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: TOKEN, password: pwd }),
+    });
+    if (!res.ok) {
+      let d = {}; try { d = await res.json(); } catch {}
+      errEl.textContent = d.detail || '密码错误';
+      return;
+    }
+    const d = await res.json();
+    authToken = d.auth_token || '';
+    document.getElementById('lock-mask').classList.remove('active');
+    connect();
+  } catch (e) { errEl.textContent = '请求失败，请重试'; }
+}
+
+async function init() {
+  if (!TOKEN) { setStatus('off', '链接无效'); return; }
+  try {
+    const res = await fetch(`/api/share/meta/${encodeURIComponent(TOKEN)}`);
+    if (!res.ok) { setStatus('off', '链接无效或分享未开启'); return; }
+    const meta = await res.json();
+    if (meta.need_password) {
+      setStatus('off', '需要密码');
+      document.getElementById('lock-mask').classList.add('active');
+      document.getElementById('lock-pwd').focus();
+      return;
+    }
+    // 无密码：直接获取（空）令牌并连接
+    const a = await (await fetch('/api/share/auth', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: TOKEN, password: '' }),
+    })).json();
+    authToken = a.auth_token || '';
+    connect();
+  } catch (e) { setStatus('off', '初始化失败'); }
+}
+document.getElementById('lock-pwd').addEventListener('keydown', e => { if (e.key === 'Enter') doUnlock(); });
+init();
 </script>
 </body>
 </html>
