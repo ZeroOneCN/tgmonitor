@@ -53,13 +53,6 @@
   }
   .msg-file:hover { border-color: var(--accent); }
   .empty { text-align: center; color: var(--muted); padding: 60px 20px; line-height: 1.8; }
-  .load-more-wrap { text-align: center; margin: 16px 0; }
-  #load-more-btn {
-    background: transparent; border: 1px dashed var(--border); color: var(--muted);
-    padding: 10px 24px; border-radius: 8px; cursor: pointer; font-size: 13px; width: 100%;
-  }
-  #load-more-btn:hover { color: var(--accent); border-color: var(--accent); }
-  #load-more-btn:disabled { opacity: .4; cursor: default; }
   .footer-note { text-align: center; color: var(--muted); font-size: 12px; margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--border);}
   /* 模态框（密码锁 / 媒体预览） */
   .modal-mask {
@@ -101,12 +94,9 @@
 
 <main>
   <div id="list"></div>
-  <div class="empty" id="empty" style="display:none;">
+  <div class="empty" id="empty">
     <div style="font-size:40px;margin-bottom:12px;">&#128172;</div>
-    暂无消息<br><span style="font-size:13px;">实时监听中，新的匹配消息会立即显示在这里</span>
-  </div>
-  <div class="load-more-wrap">
-    <button id="load-more-btn" onclick="loadMore()" style="display:none;">&#8593; 加载更多历史消息</button>
+    等待接收实时消息<br><span style="font-size:13px;">页面在线时将这里实时显示新的匹配消息，不在线期间不会拉取历史记录</span>
   </div>
   <div class="footer-note">本页面仅用于查看，由分享者配置与管理</div>
 </main>
@@ -133,12 +123,32 @@
 <script>
 const TOKEN = (window.location.pathname.match(/\/share\/([^/?#]+)/) || [])[1] || '';
 const TITLE = '消息分享';
-let items = [];          // 时间正序（旧→新）
-let oldestId = null;     // 最早一条消息 id，用于加载更多
-let authToken = '';
-let unread = 0;
-const notifyOn = localStorage.getItem('share_notify') === '1';
-if (notifyOn) document.getElementById('notify-btn').classList.add('on');
+const AUTH_KEY = 'share_auth_token.' + TOKEN;   // 按分享 token 区分，避免串用
+const NOTIFY_KEY = 'share_notify';
+
+let notifyOn = localStorage.getItem(NOTIFY_KEY) === '1';
+let authToken = localStorage.getItem(AUTH_KEY) || '';
+let count = 0;
+let ws = null, reconnectDelay = 1000;
+
+renderNotifyBtn();
+if (notifyOn && 'Notification' in window && Notification.permission === 'default') {
+  Notification.requestPermission();
+}
+
+function renderNotifyBtn() {
+  const btn = document.getElementById('notify-btn');
+  btn.innerHTML = '\u{1F514} 提醒: ' + (notifyOn ? '开' : '关');
+  btn.classList.toggle('on', notifyOn);
+}
+function toggleNotify() {
+  notifyOn = !notifyOn;
+  localStorage.setItem(NOTIFY_KEY, notifyOn ? '1' : '0');
+  renderNotifyBtn();
+  if (notifyOn && 'Notification' in window && Notification.permission === 'default') {
+    Notification.requestPermission();
+  }
+}
 
 let _beepCtx = null;
 function beep() {
@@ -155,24 +165,16 @@ function beep() {
     o.stop(_beepCtx.currentTime + 0.2);
   } catch (e) {}
 }
+let unread = 0;
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { unread = 0; document.title = TITLE; }
+});
 function notify(item) {
   beep();
   if (notifyOn && 'Notification' in window && Notification.permission === 'granted') {
     try { new Notification((item.chat_title || '消息分享'), { body: (item.text || '').slice(0, 80) || '（含媒体）' }); } catch (e) {}
   }
   if (document.hidden) { unread += 1; document.title = `(${unread}) ${TITLE}`; }
-}
-document.addEventListener('visibilitychange', () => {
-  if (!document.hidden) { unread = 0; document.title = TITLE; }
-});
-function toggleNotify() {
-  const on = !notifyOn;
-  localStorage.setItem('share_notify', on ? '1' : '0');
-  location.reload();
-}
-// 首次进入时若开启过提醒则申请权限
-if (notifyOn && 'Notification' in window && Notification.permission === 'default') {
-  Notification.requestPermission();
 }
 
 function escHtml(s) {
@@ -181,7 +183,6 @@ function escHtml(s) {
   }[c]));
 }
 function linkifyUrls(s) {
-  // 把文本中的 URL 转成可点击超链接；s 应为已 escape 后的 HTML 字符串
   if (!s) return s;
   const re = /(?:https?:\/\/|www\.)[A-Za-z0-9\-._~:/?#\[\]@!$&'()*+,;=%]+/g;
   return s.replace(re, function(m) {
@@ -218,12 +219,12 @@ function mediaThumb(item) {
   }
   return '';
 }
-function msgHtml(item, isNew) {
+function msgHtml(item) {
   const topic = item.topic_name ? `\u2022 <span class="msg-topic">${escHtml(item.topic_name)}</span>` : '';
   const sender = item.sender_name ? `<span class="msg-sender">${escHtml(item.sender_name)}</span>` : '';
   const rule = item.rule_remark ? `<span class="msg-rule">${escHtml(item.rule_remark)}</span>` : '';
   return `
-    <div class="msg${isNew ? ' new' : ''}">
+    <div class="msg new">
       <div class="msg-head">
         <span class="msg-chat">${escHtml(item.chat_title || item.chat_id || '未知群组')}</span>
         ${topic}${sender}${rule}
@@ -233,63 +234,51 @@ function msgHtml(item, isNew) {
       ${mediaThumb(item)}
     </div>`;
 }
-function render(list) {
-  const container = document.getElementById('list');
-  container.innerHTML = list.slice().reverse().map((m, i) => msgHtml(m, false)).join('');
-  updateListState();
-}
-function updateListState() {
-  document.getElementById('count').textContent = items.length + ' 条';
-  document.getElementById('empty').style.display = items.length ? 'none' : 'block';
-  document.getElementById('load-more-btn').style.display = oldestId ? 'block' : 'none';
+function updateCount() {
+  document.getElementById('count').textContent = count + ' 条';
 }
 function prepend(item) {
-  items.push(item);
-  document.getElementById('list').insertAdjacentHTML('afterbegin', msgHtml(item, true));
-  updateListState();
+  count += 1;
+  document.getElementById('list').insertAdjacentHTML('afterbegin', msgHtml(item));
+  document.getElementById('empty').style.display = 'none';
+  updateCount();
   notify(item);
 }
+
 function setStatus(cls, text) {
   document.getElementById('dot').className = 'dot ' + cls;
   document.getElementById('status-text').textContent = text;
 }
-
-async function loadMore() {
-  const btn = document.getElementById('load-more-btn');
-  if (!oldestId || btn.disabled) return;
-  btn.disabled = true;
-  btn.textContent = '加载中...';
-  try {
-    const res = await fetch(`/api/share/history/${encodeURIComponent(TOKEN)}?auth=${encodeURIComponent(authToken)}&before_id=${oldestId}&limit=50`);
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const d = await res.json();
-    const more = d.items || [];
-    // 新的历史消息（更旧）追加到最底部
-    document.getElementById('list').insertAdjacentHTML('beforeend', more.map(m => msgHtml(m, false)).join(''));
-    items = more.concat(items);
-    oldestId = d.oldest_id || null;
-    updateListState();
-  } catch (e) { console.error('加载更多失败', e); }
-  finally {
-    btn.disabled = false;
-    btn.textContent = '\u2191 加载更多历史消息';
-  }
+function showLock() {
+  setStatus('off', '需要密码');
+  document.getElementById('lock-mask').classList.add('active');
+  document.getElementById('lock-pwd').focus();
 }
+function hideLock() { document.getElementById('lock-mask').classList.remove('active'); }
 
-// ---- 鉴权流程：meta → (密码锁) → auth → 连接 WS ----
-let ws = null, reconnectDelay = 1000;
+// ---- WebSocket：仅实时接收，不加载历史 ----
 function connect() {
   const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${protocol}//${location.host}/ws/share/${encodeURIComponent(TOKEN)}?auth=${encodeURIComponent(authToken)}`);
   ws.onopen = () => { setStatus('on', '已连接'); reconnectDelay = 1000; };
-  ws.onclose = () => { setStatus('off', '已断开，重连中...'); setTimeout(connect, reconnectDelay); reconnectDelay = Math.min(reconnectDelay * 2, 15000); };
-  ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
     let data;
     try { data = JSON.parse(e.data); } catch { return; }
-    if (data.type === 'init') { items = data.items || []; oldestId = (items[0] && items[0].id) || null; render(items); }
-    else if (data.type === 'new') { prepend(data.item); }
+    if (data.type === 'new') prepend(data.item);
   };
+  ws.onclose = (e) => {
+    if (e.code === 1008) {
+      // 密码鉴权失败：清掉本地令牌，重新要求输入
+      authToken = '';
+      localStorage.removeItem(AUTH_KEY);
+      showLock();
+      return;
+    }
+    setStatus('off', '已断开，重连中...');
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 15000);
+  };
+  ws.onerror = () => ws.close();
 }
 
 async function doUnlock() {
@@ -309,7 +298,8 @@ async function doUnlock() {
     }
     const d = await res.json();
     authToken = d.auth_token || '';
-    document.getElementById('lock-mask').classList.remove('active');
+    localStorage.setItem(AUTH_KEY, authToken);
+    hideLock();
     connect();
   } catch (e) { errEl.textContent = '请求失败，请重试'; }
 }
@@ -320,19 +310,11 @@ async function init() {
     const res = await fetch(`/api/share/meta/${encodeURIComponent(TOKEN)}`);
     if (!res.ok) { setStatus('off', '链接无效或分享未开启'); return; }
     const meta = await res.json();
-    if (meta.need_password) {
-      setStatus('off', '需要密码');
-      document.getElementById('lock-mask').classList.add('active');
-      document.getElementById('lock-pwd').focus();
+    if (meta.need_password && !authToken) {
+      showLock();
       return;
     }
-    // 无密码：直接获取（空）令牌并连接
-    const a = await (await fetch('/api/share/auth', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token: TOKEN, password: '' }),
-    })).json();
-    authToken = a.auth_token || '';
-    connect();
+    connect();  // 已有本地令牌（刷新/切页）或无需密码时直接连接
   } catch (e) { setStatus('off', '初始化失败'); }
 }
 document.getElementById('lock-pwd').addEventListener('keydown', e => { if (e.key === 'Enter') doUnlock(); });

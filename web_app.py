@@ -3134,35 +3134,6 @@ def update_sharing(request: Request, data: dict):
     return {"status": "ok", "sharing": sharing}
 
 
-def _share_query_messages(user_id: int, sharing: dict, before_id: int = 0, limit: int = 200, max_scan: int = 600):
-    """按分享过滤拉取历史消息；返回 (时间正序 items, 最早一条的 id)"""
-    conn = sqlite3.connect(str(HISTORY_DB_PATH))
-    try:
-        if before_id and before_id > 0:
-            rows = conn.execute(
-                "SELECT id, ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, "
-                "has_media, media_type, media_path, rule_remark, topic_id, topic_name "
-                "FROM history WHERE user_id=? AND id<? ORDER BY id DESC LIMIT ?",
-                (user_id, before_id, max_scan)).fetchall()
-        else:
-            rows = conn.execute(
-                "SELECT id, ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, "
-                "has_media, media_type, media_path, rule_remark, topic_id, topic_name "
-                "FROM history WHERE user_id=? ORDER BY id DESC LIMIT ?",
-                (user_id, max_scan)).fetchall()
-    finally:
-        conn.close()
-    items = []
-    for r in rows:
-        if len(items) >= limit:
-            break
-        if _share_should_pass(sharing, r[5], r[12]):
-            items.append(share_payload_for_row(r))
-    items.reverse()  # 时间正序（旧→新）
-    oldest_id = items[0]["id"] if items else None
-    return items, oldest_id
-
-
 @app.get("/api/share/meta/{token}")
 def share_meta(token: str):
     """分享页元信息：是否需要密码（页面据此先出密码输入框）"""
@@ -3190,21 +3161,6 @@ def share_auth(data: dict):
     return {"auth_token": f"{token}.{_share_sign(token, pwd)}"}
 
 
-@app.get("/api/share/history/{token}")
-def share_history(token: str, auth: str = "", before_id: int = 0, limit: int = 50):
-    """分享页加载更多历史消息（翻页）；设了密码须带有效 auth"""
-    user_id = _resolve_share_token(token)
-    if user_id is None:
-        raise HTTPException(404, "链接无效或分享未开启")
-    user = get_user_by_id(user_id)
-    sharing = json.loads(user["sharing"] or "{}")
-    if not _share_auth_valid(token, sharing, auth):
-        raise HTTPException(403, "访问受限或密码错误")
-    limit = max(1, min(int(limit), 200))
-    items, oldest_id = _share_query_messages(user_id, sharing, int(before_id) if before_id else 0, limit)
-    return {"items": items, "oldest_id": oldest_id}
-
-
 @app.get("/share/{token}", response_class=HTMLResponse)
 async def share_page(token: str):
     user_id = _resolve_share_token(token)
@@ -3229,12 +3185,6 @@ async def ws_share(websocket: WebSocket, token: str):
         await websocket.close(code=1008)
         return
     await share_hub.add(token, websocket)
-    try:
-        # 首次连接推送最近的历史消息（按分享过滤，最多 200 条），之后靠 ShareHub 实时推送
-        items, _ = _share_query_messages(user_id, sharing, 0, 200)
-        await websocket.send_text(json.dumps({"type": "init", "items": items}, ensure_ascii=False))
-    except Exception:
-        pass
     try:
         while True:
             await websocket.receive_text()
