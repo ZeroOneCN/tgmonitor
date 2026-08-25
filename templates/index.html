@@ -493,6 +493,55 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
       </div>
     </div>
 
+    <div class="settings-section" style="margin-top: 20px;">
+      <h3>消息分享</h3>
+      <p class="text-sm mb-8">生成一个只读分享页，发给无 Webhook 的人即可实时查看匹配的监控消息。分享页仅凭长随机链接访问，无需对方做任何配置。</p>
+
+      <div class="form-row" style="align-items: end; flex-wrap: wrap;">
+        <div class="form-group">
+          <label>启用分享</label>
+          <div class="form-check" style="margin-top: 8px;">
+            <input type="checkbox" id="share-enabled">
+            <label for="share-enabled">开启</label>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>分享范围</label>
+          <select class="form-control" id="share-filter-type" style="min-width: 200px;" onchange="onShareFilterTypeChange()">
+            <option value="all">全部消息</option>
+            <option value="rules">按规则</option>
+            <option value="chats">按群 / 频道</option>
+          </select>
+        </div>
+      </div>
+
+      <div id="share-filter-box" style="display:none; margin-top: 12px;">
+        <label>选择范围（可多选）</label>
+        <div id="share-filter-options" class="share-opts" style="display:flex; flex-wrap:wrap; gap:8px; margin-top:8px;"></div>
+      </div>
+
+      <div id="share-link-box" style="display:none; margin-top: 12px;">
+        <div class="form-row" style="align-items:end; flex-wrap:wrap;">
+          <div class="form-group" style="flex:1; min-width:260px;">
+            <label>分享链接（复制发给对方即可）</label>
+            <input class="form-control" id="share-link" readonly>
+          </div>
+          <div class="form-group">
+            <label>&nbsp;</label>
+            <div style="display:flex; gap:8px;">
+              <button class="btn btn-outline btn-sm" onclick="copyShareLink()">复制</button>
+              <button class="btn btn-outline btn-sm" onclick="window.open(document.getElementById('share-link').value,'_blank')">打开</button>
+              <button class="btn btn-outline btn-sm" onclick="resetShareToken()">重置链接</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="margin-top: 16px;">
+        <button class="btn btn-primary btn-sm" onclick="saveSharing()">保存分享设置</button>
+      </div>
+    </div>
+
     <div class="settings-section" id="service-status-section" style="margin-top: 20px; display:none;">
       <h3>服务状态</h3>
       <div class="text-sm mb-8">服务健康检查与一键重启（仅管理员可见，重启时会短暂中断，由 PM2 自动拉起）。</div>
@@ -1718,6 +1767,8 @@ async function loadSettings() {
     const cleanup = s.cleanup || {};
     document.getElementById('cleanup-enabled').checked = !!cleanup.enabled;
     document.getElementById('cleanup-days').value = cleanup.keep_days || 30;
+    // 分享配置
+    loadSharing();
   } catch (e) {
     console.error('加载设置失败:', e);
   }
@@ -1836,6 +1887,101 @@ async function saveSettings() {
     setBtnLoading(document.getElementById('save-settings-btn'), false);
     toast('保存失败: ' + e.message, 'error');
   }
+}
+
+// ============================================================
+// 消息分享
+// ============================================================
+let shareOptions = { rules: [], chats: [] };
+let shareCurrentToken = '';
+
+function currentShareFilterIds() {
+  const box = document.getElementById('share-filter-options');
+  return box ? Array.from(box.querySelectorAll('input[type=checkbox]:checked')).map(c => c.value) : [];
+}
+
+function renderShareFilterOptions(selectedIds) {
+  const type = document.getElementById('share-filter-type').value;
+  const box = document.getElementById('share-filter-box');
+  const target = document.getElementById('share-filter-options');
+  if (type === 'all') {
+    box.style.display = 'none';
+    target.innerHTML = '';
+    return;
+  }
+  box.style.display = 'block';
+  const opts = type === 'rules' ? (shareOptions.rules || []) : (shareOptions.chats || []);
+  if (opts.length === 0) {
+    target.innerHTML = '<div class="text-sm" style="color:#b2bec3;">暂无可用范围，请先在账号规则中配置再选择。</div>';
+    return;
+  }
+  const sel = new Set((selectedIds || []).map(String));
+  target.innerHTML = opts.map(o => `
+    <label style="display:inline-flex;align-items:center;gap:6px;background:#f1f2f6;padding:6px 10px;border-radius:8px;cursor:pointer;">
+      <input type="checkbox" value="${escHtml(o.value)}" ${sel.has(String(o.value)) ? 'checked' : ''}> ${escHtml(o.label)}
+    </label>`).join('');
+}
+
+function updateShareLinkUI(cfg) {
+  shareCurrentToken = (cfg && cfg.token) || '';
+  const enabled = !!(cfg && cfg.enabled && cfg.token);
+  const linkBox = document.getElementById('share-link-box');
+  linkBox.style.display = enabled ? 'block' : 'none';
+  if (enabled) document.getElementById('share-link').value = location.origin + '/share/' + cfg.token;
+}
+
+function onShareFilterTypeChange() {
+  renderShareFilterOptions(currentShareFilterIds());
+  // 切换范围类型后保留链接（实际保存以最终勾选为准）
+  updateShareLinkUI({ enabled: document.getElementById('share-enabled').checked,
+                      token: shareCurrentToken });
+}
+
+async function loadSharing() {
+  try {
+    const d = await api('GET', '/api/sharing');
+    shareOptions = d.options || { rules: [], chats: [] };
+    const cfg = d.config || {};
+    shareCurrentToken = cfg.token || '';
+    document.getElementById('share-enabled').checked = !!cfg.enabled;
+    document.getElementById('share-filter-type').value = cfg.filter_type || 'all';
+    renderShareFilterOptions(cfg.filter_ids);
+    updateShareLinkUI(cfg);
+  } catch (e) { console.error('加载分享配置失败:', e); }
+}
+
+async function saveSharing() {
+  const payload = {
+    enabled: document.getElementById('share-enabled').checked,
+    filter_type: document.getElementById('share-filter-type').value,
+    filter_ids: currentShareFilterIds(),
+  };
+  try {
+    const d = await api('PUT', '/api/sharing', payload);
+    updateShareLinkUI(d.sharing);
+    toast('分享设置已保存', 'success');
+  } catch (e) { toast('保存失败: ' + e.message, 'error'); }
+}
+
+async function copyShareLink() {
+  const v = document.getElementById('share-link').value;
+  if (!v) { toast('请先保存并开启分享', 'warning'); return; }
+  try { await navigator.clipboard.writeText(v); toast('链接已复制', 'success'); }
+  catch { window.prompt('复制链接', v); }
+}
+
+async function resetShareToken() {
+  if (!await showConfirm('重置后旧的分享链接将立即失效，确认要继续吗？')) return;
+  try {
+    await api('PUT', '/api/sharing', {
+      enabled: true,
+      filter_type: document.getElementById('share-filter-type').value,
+      filter_ids: currentShareFilterIds(),
+      reset_token: true,
+    });
+    toast('链接已重置', 'success');
+    loadSharing();
+  } catch (e) { toast('重置失败: ' + e.message, 'error'); }
 }
 
 // 修改当前用户密码（管理员/普通用户通用）

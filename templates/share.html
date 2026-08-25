@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>消息分享</title>
+<style>
+  :root {
+    --bg: #0f1419; --card: #1a2029; --border: #2c3440;
+    --text: #e6edf3; --muted: #8b98a5; --accent: #229ed9;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+  }
+  header {
+    position: sticky; top: 0; z-index: 10;
+    display: flex; align-items: center; gap: 10px;
+    padding: 14px 20px; background: var(--card); border-bottom: 1px solid var(--border);
+  }
+  header h1 { font-size: 16px; font-weight: 600; flex: 1; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #e67e22; display: inline-block; }
+  .dot.on { background: #2ecc71; }
+  .dot.off { background: #e74c3c; }
+  .status { font-size: 12px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+  .count { font-size: 12px; color: var(--muted); }
+  main { max-width: 760px; margin: 0 auto; padding: 16px 16px 40px; }
+  .msg {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 12px 14px; margin-bottom: 10px;
+  }
+  .msg-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; }
+  .msg-chat { font-weight: 600; font-size: 14px; color: var(--accent); }
+  .msg-topic { font-size: 12px; color: #8e6fd8; }
+  .msg-sender { font-size: 12px; color: var(--muted); }
+  .msg-rule { font-size: 11px; padding: 2px 8px; background: rgba(34,158,217,.15); color: #5bc0de; border-radius: 10px; }
+  .msg-time { font-size: 11px; color: var(--muted); margin-left: auto; }
+  .msg-text { font-size: 14px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
+  .msg-media { margin-top: 8px; }
+  .msg-media img { max-width: 100%; max-height: 320px; border-radius: 8px; cursor: zoom-in; display: block; }
+  .msg-media video { max-width: 100%; max-height: 320px; border-radius: 8px; display: block; }
+  .msg-file {
+    display: inline-flex; align-items: center; gap: 6px; font-size: 13px;
+    color: var(--accent); text-decoration: none; border: 1px solid var(--border); padding: 6px 10px; border-radius: 8px;
+  }
+  .msg-file:hover { border-color: var(--accent); }
+  .empty { text-align: center; color: var(--muted); padding: 60px 20px; line-height: 1.8; }
+  .footer-note { text-align: center; color: var(--muted); font-size: 12px; margin-top: 16px; padding-top: 12px; border-top: 1px dashed var(--border); }
+  /* 模态框 */
+  .modal-mask {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,.82); z-index: 100;
+    align-items: center; justify-content: center; padding: 20px;
+  }
+  .modal-mask.active { display: flex; }
+  .modal-box { max-width: 92vw; max-height: 92vh; position: relative; }
+  .modal-box img, .modal-box video { max-width: 92vw; max-height: 88vh; border-radius: 8px; }
+  .modal-close {
+    position: absolute; top: -34px; right: 0; color: #fff; font-size: 26px; cursor: pointer; background: none; border: none;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>&#128172; 消息分享</h1>
+  <span class="count" id="count">0 条</span>
+  <span class="status"><span class="dot" id="dot"></span><span id="status-text">连接中...</span></span>
+</header>
+
+<main>
+  <div id="list"></div>
+  <div class="empty" id="empty" style="display:none;">
+    <div style="font-size:40px;margin-bottom:12px;">&#128172;</div>
+    暂无消息<br><span style="font-size:13px;">实时监听中，新的匹配消息会立即显示在这里</span>
+  </div>
+  <div class="footer-note">本页面仅用于查看，由分享者配置与管理</div>
+</main>
+
+<!-- 媒体预览模态框 -->
+<div class="modal-mask" id="media-mask" onclick="if(event.target===this)closeMedia()">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeMedia()">&times;</button>
+    <div id="media-body"></div>
+  </div>
+</div>
+
+<script>
+const TOKEN = (window.location.pathname.match(/\/share\/([^/?#]+)/) || [])[1] || '';
+let count = 0;
+
+function escHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+    '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+  }[c]));
+}
+
+function openMedia(type, path) {
+  const body = document.getElementById('media-body');
+  if (type === 'video') body.innerHTML = `<video controls autoplay src="${escHtml(path)}"></video>`;
+  else if (type === 'document') {
+    body.innerHTML = /\.pdf($|#|\?)/i.test(path)
+      ? `<iframe src="${escHtml(path)}#toolbar=1" style="width:90vw;height:82vh;border:none;border-radius:8px;"></iframe>`
+      : `<a href="${escHtml(path)}" download style="color:#5bc0de;">下载文件</a>`;
+  } else body.innerHTML = `<img src="${escHtml(path)}" alt="图片">`;
+  document.getElementById('media-mask').classList.add('active');
+}
+function closeMedia() { document.getElementById('media-mask').classList.remove('active'); }
+
+function mediaThumb(item) {
+  const p = item.media_path;
+  if (!p) return '';
+  if (item.media_type === 'image' || item.media_type === 'sticker' || item.media_type === 'gif') {
+    return `<div class="msg-media"><img src="${escHtml(p)}" alt="图片" onclick="openMedia('image','${escHtml(p)}')"></div>`;
+  }
+  if (item.media_type === 'video') {
+    return `<div class="msg-media"><video controls src="${escHtml(p)}"></video></div>`;
+  }
+  if (item.media_type === 'document') {
+    return `<div class="msg-media"><a class="msg-file" href="${escHtml(p)}" download>&#128206; 文档下载</a>
+            &nbsp;<a class="msg-file" href="javascript:void(0)" onclick="openMedia('document','${escHtml(p)}')">&#128065; 在线预览</a></div>`;
+  }
+  return ''; // audio/photo 文件等仅兜底链接
+}
+
+function msgHtml(item) {
+  const topic = item.topic_name ? `\u2022 <span class="msg-topic">${escHtml(item.topic_name)}</span>` : '';
+  const sender = item.sender_name ? `<span class="msg-sender">${escHtml(item.sender_name)}</span>` : '';
+  const rule = item.rule_remark ? `<span class="msg-rule">${escHtml(item.rule_remark)}</span>` : '';
+  return `
+    <div class="msg">
+      <div class="msg-head">
+        <span class="msg-chat">${escHtml(item.chat_title || item.chat_id || '未知群组')}</span>
+        ${topic}${sender}
+        ${rule}
+        <span class="msg-time">${escHtml(item.ts)}</span>
+      </div>
+      ${item.text ? `<div class="msg-text">${escHtml(item.text)}</div>` : ''}
+      ${mediaThumb(item)}
+    </div>`;
+}
+
+function render(items) {
+  // items 时间正序（旧→新），展示为最新在上
+  const list = document.getElementById('list');
+  list.innerHTML = items.slice().reverse().map(msgHtml).join('');
+  count = items.length;
+  document.getElementById('count').textContent = count + ' 条';
+  document.getElementById('empty').style.display = items.length ? 'none' : 'block';
+}
+
+function setStatus(cls, text) {
+  const dot = document.getElementById('dot');
+  dot.className = 'dot ' + cls;
+  document.getElementById('status-text').textContent = text;
+}
+
+function prepend(item) {
+  document.getElementById('list').insertAdjacentHTML('afterbegin', msgHtml(item));
+  count += 1;
+  document.getElementById('count').textContent = count + ' 条';
+  document.getElementById('empty').style.display = 'none';
+  // 置顶提示轻微高亮
+  const first = document.getElementById('list').firstElementChild;
+  if (first) { first.style.transition = 'background .6s'; first.style.background = 'rgba(34,158,217,.12)'; setTimeout(() => first.style.background = '', 1500); }
+}
+
+let ws, items = [], reconnectDelay = 1000;
+
+function connect() {
+  if (!TOKEN) { setStatus('off', '链接无效'); return; }
+  const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${protocol}//${location.host}/ws/share/${encodeURIComponent(TOKEN)}`);
+  ws.onopen = () => { setStatus('on', '已连接'); reconnectDelay = 1000; };
+  ws.onclose = () => {
+    setStatus('off', '已断开，重连中...');
+    setTimeout(connect, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 15000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (e) => {
+    let data;
+    try { data = JSON.parse(e.data); } catch { return; }
+    if (data.type === 'init') { items = data.items || []; render(items); }
+    else if (data.type === 'new') { items.push(data.item); prepend(data.item); }
+  };
+}
+
+connect();
+</script>
+</body>
+</html>

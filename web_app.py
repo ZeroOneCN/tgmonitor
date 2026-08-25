@@ -210,6 +210,7 @@ def init_users_db():
             webhooks TEXT NOT NULL DEFAULT '[]',
             cleanup TEXT NOT NULL DEFAULT '{}',
             rule_templates TEXT NOT NULL DEFAULT '[]',
+            sharing TEXT NOT NULL DEFAULT '{}',
             banned INTEGER DEFAULT 0,
             ban_reason TEXT DEFAULT '',
             banned_at TEXT DEFAULT '',
@@ -231,6 +232,7 @@ def init_users_db():
             ("banned", "ALTER TABLE users ADD COLUMN banned INTEGER DEFAULT 0"),
             ("ban_reason", "ALTER TABLE users ADD COLUMN ban_reason TEXT DEFAULT ''"),
             ("banned_at", "ALTER TABLE users ADD COLUMN banned_at TEXT DEFAULT ''"),
+            ("sharing", "ALTER TABLE users ADD COLUMN sharing TEXT DEFAULT '{}'"),
         ]:
             if col not in ucols:
                 conn.execute(ddl)
@@ -381,12 +383,17 @@ def _row_to_dict(row) -> dict:
 def get_user_config(row) -> dict:
     """把 users 行的业务配置字段解析为 dict"""
     if row is None:
-        return default_config()
+        cfg = default_config()
+        cfg["sharing"] = {"enabled": False, "token": "", "filter_type": "all", "filter_ids": []}
+        return cfg
+    sharing = json.loads(row["sharing"] or "{}")
+    sharing = {**{"enabled": False, "token": "", "filter_type": "all", "filter_ids": []}, **sharing}
     return {
         "accounts": json.loads(row["accounts"] or "[]"),
         "webhooks": json.loads(row["webhooks"] or "[]"),
         "cleanup": json.loads(row["cleanup"] or "{}"),
         "rule_templates": json.loads(row["rule_templates"] or "[]"),
+        "sharing": sharing,
     }
 
 
@@ -394,11 +401,12 @@ def save_user_config(user_id: int, cfg: dict):
     conn = _users_conn()
     try:
         conn.execute(
-            "UPDATE users SET accounts=?, webhooks=?, cleanup=?, rule_templates=? WHERE id=?",
+            "UPDATE users SET accounts=?, webhooks=?, cleanup=?, rule_templates=?, sharing=? WHERE id=?",
             (json.dumps(cfg.get("accounts", []), ensure_ascii=False),
              json.dumps(cfg.get("webhooks", []), ensure_ascii=False),
              json.dumps(cfg.get("cleanup", {}), ensure_ascii=False),
              json.dumps(cfg.get("rule_templates", []), ensure_ascii=False),
+             json.dumps(cfg.get("sharing", {}), ensure_ascii=False),
              user_id),
         )
         conn.commit()
@@ -579,6 +587,27 @@ def save_history(user_id: int, account_name: str, account_idx: int, chat_title: 
         inserted = cur.rowcount > 0
         conn.commit()
         conn.close()
+        if inserted:
+            try:
+                _share_notify({
+                    "id": cur.lastrowid,
+                    "ts": datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S"),
+                    "account_name": str(account_name or ""),
+                    "account_idx": int(account_idx),
+                    "chat_title": str(chat_title or ""),
+                    "chat_id": str(chat_id or ""),
+                    "sender_name": str(sender_name or ""),
+                    "sender_id": str(sender_id or ""),
+                    "text": str(text or ""),
+                    "has_media": bool(has_media),
+                    "media_type": str(media_type or ""),
+                    "media_path": str(media_path or ""),
+                    "rule_remark": str(rule_remark or ""),
+                    "topic_id": str(topic_id or ""),
+                    "topic_name": str(topic_name or ""),
+                }, user_id, chat_id, rule_remark)
+            except Exception:
+                pass
         return inserted
     except Exception:
         return True
@@ -861,6 +890,83 @@ class WebLogHandler(logging.Handler):
 
 
 broadcaster = LogBroadcaster()
+
+# ============================================================
+# 分享页 WebSocket 广播（按分享 token 维度）
+# ============================================================
+class ShareHub:
+    def __init__(self):
+        self.conns: dict[str, list] = {}
+
+    async def add(self, token: str, ws):
+        await ws.accept()
+        self.conns.setdefault(token, []).append(ws)
+
+    def remove(self, token: str, ws):
+        arr = self.conns.get(token)
+        if arr and ws in arr:
+            arr.remove(ws)
+            if not arr:
+                self.conns.pop(token, None)
+
+    async def broadcast(self, token: str, payload: dict):
+        arr = self.conns.get(token)
+        if not arr:
+            return
+        data = json.dumps(payload, ensure_ascii=False)
+        dead = []
+        for ws in arr:
+            try:
+                await ws.send_text(data)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.remove(token, ws)
+
+
+share_hub = ShareHub()
+
+
+def share_payload_for_row(r) -> dict:
+    """把 history 行转成分享页可用的消息 dict"""
+    return {
+        "id": r[0], "ts": r[1], "account_name": r[2], "account_idx": r[3],
+        "chat_title": r[4], "chat_id": r[5], "sender_name": r[6], "sender_id": r[7],
+        "text": r[8], "has_media": bool(r[9]), "media_type": r[10], "media_path": r[11] or "",
+        "rule_remark": r[12], "topic_id": r[13] or "", "topic_name": r[14] or "",
+    }
+
+
+def _share_should_pass(sharing: dict, chat_id, rule_remark: str) -> bool:
+    """分享过滤判断：返回 True 表示消息应进入分享页"""
+    if not sharing.get("enabled"):
+        return False
+    ftype = sharing.get("filter_type", "all")
+    fids = sharing.get("filter_ids") or []
+    if ftype == "chats":
+        return str(chat_id or "") in [str(x) for x in fids]
+    if ftype == "rules":
+        return str(rule_remark or "") in [str(x) for x in fids]
+    return True
+
+
+def _share_notify(payload: dict, user_id: int, chat_id, rule_remark: str):
+    """新消息入库后，若用户的分享已开启且符合过滤，则实时推送给该分享页"""
+    try:
+        user = get_user_by_id(user_id)
+        if user is None:
+            return
+        sharing = json.loads(user["sharing"] or "{}")
+        if not _share_should_pass(sharing, chat_id, rule_remark):
+            return
+        token = sharing.get("token", "")
+        if not token:
+            return
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(share_hub.broadcast(token, {"type": "new", "item": payload}))
+    except Exception:
+        pass
 # 屏蔽 telethon 内部的 sys.stdout print
 import builtins as _builtins
 _orig_print = _builtins.print
@@ -2933,6 +3039,112 @@ async def ws_logs(websocket: WebSocket):
             await websocket.receive_text()  # 保持连接，接收心跳
     except WebSocketDisconnect:
         broadcaster.remove_connection(websocket)
+
+
+# ============================================================
+# API & 页面 - 消息分享（只读分享页，供无 webhook 的人查看）
+# ============================================================
+def _resolve_share_token(token: str) -> int | None:
+    """根据分享 token 解析出对应用户 id；分享未开启/token 无效返回 None"""
+    if not token:
+        return None
+    conn = _users_conn()
+    try:
+        rows = conn.execute("SELECT id, sharing FROM users").fetchall()
+    finally:
+        conn.close()
+    for uid, sharing_json in rows:
+        try:
+            s = json.loads(sharing_json or "{}")
+        except Exception:
+            continue
+        if s.get("enabled") and s.get("token") == token:
+            return uid
+    return None
+
+
+def _share_filter_options(cfg: dict) -> dict:
+    """从账号规则配置汇总可供分享筛选的选项（规则名、群/频道名）"""
+    rules, chats = [], []
+    seen_r, seen_c = set(), set()
+    for acc in cfg.get("accounts", []):
+        for r in acc.get("rules", []):
+            remark = str(r.get("remark", "")).strip()
+            if remark and remark not in seen_r:
+                seen_r.add(remark)
+                rules.append({"value": remark, "label": remark})
+            for t in r.get("chat_titles", []) or []:
+                t = str(t).strip()
+                if t and t not in seen_c:
+                    seen_c.add(t)
+                    chats.append({"value": t, "label": t})
+    return {"rules": rules, "chats": chats}
+
+
+@app.get("/api/sharing")
+def get_sharing(request: Request):
+    _, cfg = _user_ctx(request)
+    return {"config": cfg["sharing"], "options": _share_filter_options(cfg)}
+
+
+@app.put("/api/sharing")
+def update_sharing(request: Request, data: dict):
+    user_id, cfg = _user_ctx(request)
+    sharing = cfg["sharing"]
+    enabled = bool(data.get("enabled", sharing.get("enabled", False)))
+    if data.get("reset_token"):
+        sharing["token"] = ""
+    if enabled and not sharing.get("token"):
+        sharing["token"] = secrets.token_urlsafe(32)
+    sharing["enabled"] = enabled
+    sharing["filter_type"] = str(data.get("filter_type", sharing.get("filter_type", "all")))
+    sharing["filter_ids"] = data.get("filter_ids", sharing.get("filter_ids", []))
+    cfg["sharing"] = sharing
+    save_user_config(user_id, cfg)
+    logger.info(f"[user={user_id}] 已更新分享配置: enabled={sharing['enabled']} filter_type={sharing['filter_type']}")
+    return {"status": "ok", "sharing": sharing}
+
+
+@app.get("/share/{token}", response_class=HTMLResponse)
+async def share_page(token: str):
+    user_id = _resolve_share_token(token)
+    if user_id is None:
+        return HTMLResponse("<h1 style='font-family:sans-serif;text-align:center;margin-top:80px'>链接无效或分享已关闭</h1>", status_code=404)
+    html_path = BASE_DIR / "templates" / "share.html"
+    if not html_path.exists():
+        return HTMLResponse("<h1>请先创建 templates/share.html</h1>")
+    return HTMLResponse(html_path.read_text(encoding="utf-8"))
+
+
+@app.websocket("/ws/share/{token}")
+async def ws_share(websocket: WebSocket, token: str):
+    user_id = _resolve_share_token(token)
+    if user_id is None:
+        await websocket.close(code=1008)
+        return
+    await share_hub.add(token, websocket)
+    try:
+        # 首次连接推送最近的历史消息（按分享过滤），之后靠 ShareHub 实时推送
+        user = get_user_by_id(user_id)
+        sharing = json.loads(user["sharing"] or "{}")
+        conn = sqlite3.connect(str(HISTORY_DB_PATH))
+        rows = conn.execute(
+            "SELECT id, ts, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, "
+            "has_media, media_type, media_path, rule_remark, topic_id, topic_name "
+            "FROM history WHERE user_id=? ORDER BY id DESC LIMIT 50",
+            (user_id,)
+        ).fetchall()
+        conn.close()
+        items = [share_payload_for_row(r) for r in rows if _share_should_pass(sharing, r[5], r[12])]
+        items.reverse()  # 时间序展示
+        await websocket.send_text(json.dumps({"type": "init", "items": items}, ensure_ascii=False))
+    except Exception:
+        pass
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        share_hub.remove(token, websocket)
 
 
 # ============================================================
