@@ -1562,6 +1562,84 @@ class AsyncMonitor:
             except Exception as e:
                 logger.error(f"[{account_name}] 处理消息异常: {e}")
 
+        # 3.2 编辑消息监听：发送后被编辑的消息，每次编辑都作为新告警推送（不限流）
+        @self.client.on(events.MessageEdited())
+        async def edit_handler(event):
+            if self._stop_event.is_set():
+                return
+            try:
+                msg = event.message
+                chat = await event.get_chat()
+                sender = await event.get_sender()
+                chat_id = getattr(chat, "id", None)
+                chat_title = get_display_name(chat) if chat else "(未知)"
+                sender_id = getattr(sender, "id", None)
+                sender_username = getattr(sender, "username", None)
+                sender_name = get_display_name(sender) if sender else "(未知)"
+                text = msg.text or ""
+                topic_id, topic_name = get_topic_info(msg)
+                if topic_id and chat_id is not None:
+                    topic_name = await self.resolve_topic_name(chat_id, topic_id)
+                edit_time = ""
+                if getattr(msg, "edit_date", None):
+                    edit_time = datetime.fromtimestamp(msg.edit_date, tz=SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                for rule in rules:
+                    if not (chat_matches(chat_id, chat_title, rule) and user_matches(sender_id, sender_username, rule)
+                            and keyword_matches(text, rule) and topic_matches(topic_id, topic_name, rule)):
+                        continue
+                    # 编辑消息无需判重：用户选择每次编辑都推
+                    remark = rule.get("remark", "规则")
+                    alert = format_alert(event, remark, chat_title, sender_name, topic_name)
+                    alert += f"\n\n✏️ 该消息已被编辑（时间：{edit_time or '未知'}）"
+                    logger.info(f"\n[{account_name}] {alert}")
+                    if rule.get("forward_to_saved", True):
+                        try:
+                            await self.client.forward_messages("me", msg)
+                            logger.info(f"[{account_name}] 已转发已编辑消息到 Saved Messages")
+                        except Exception as e:
+                            logger.error(f"[{account_name}] 编辑消息转发失败: {e}")
+                    # 媒体下载（用于 Webhook 推送 + 网页展示存档）
+                    media_type = detect_media_type(msg)
+                    media_data = None
+                    media_path = ""
+                    if media_type:
+                        try:
+                            file_bytes_val = await self.client.download_media(msg, file=bytes)
+                            if isinstance(file_bytes_val, bytes) and file_bytes_val:
+                                media_dir = BASE_DIR / "media"
+                                media_dir.mkdir(parents=True, exist_ok=True)
+                                ext = media_ext(msg, media_type)
+                                fname = f"{msg.id}_{int(datetime.now().timestamp())}{ext}"
+                                (media_dir / fname).write_bytes(file_bytes_val)
+                                media_path = f"/media/{fname}"
+                                media_data = {"bytes": file_bytes_val, "filename": f"telegram{ext}", "media_type": media_type, "sticker_mime": ""}
+                        except Exception as e:
+                            logger.warning(f"[{account_name}] 编辑消息下载媒体失败: {e}")
+                    # 历史入库：文本加“已编辑”标记，前端可见
+                    save_history(self.user_id, account_name, self.account_idx, chat_title, chat_id,
+                                 sender_name, sender_id, f"✏️[已编辑] {text}", bool(media_type), media_type, remark, media_path, msg.id, topic_id, topic_name)
+                    # Webhook：规则级优先，有规则级则跳过全局
+                    wh_list = []
+                    if rule.get("webhook_enabled"):
+                        rw = {
+                            "enabled": True,
+                            "url": rule.get("webhook_url", ""),
+                            "telegram_bot_token": rule.get("webhook_bot_token", ""),
+                            "telegram_chat_id": rule.get("webhook_chat_id", ""),
+                        }
+                        u = rw["url"].strip()
+                        if u:
+                            wh_list.append(rw)
+                    else:
+                        for gw in (webhooks or []):
+                            u = gw.get("url", "").strip()
+                            if u:
+                                wh_list.append(gw)
+                    if wh_list:
+                        asyncio.ensure_future(send_webhook_alerts(alert, wh_list, media_data, account_name, self.account_idx, remark, self.user_id))
+            except Exception as e:
+                logger.error(f"[{account_name}] 处理编辑消息异常: {e}")
+
         # 4. 保持连接
         try:
             await self.client.run_until_disconnected()
