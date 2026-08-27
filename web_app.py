@@ -521,6 +521,20 @@ def init_history_db():
             conn.execute("CREATE INDEX IF NOT EXISTS idx_history_dedup ON history (user_id, account_idx, msg_id)")
         except Exception:
             pass
+
+    # 迁移：旧记录 user_id=0（迁移前无多租户字段）归属到第一个用户
+    try:
+        zero_count = conn.execute("SELECT COUNT(*) FROM history WHERE user_id = 0").fetchone()[0]
+        if zero_count > 0:
+            uconn = sqlite3.connect(str(USERS_DB_PATH))
+            first_user = uconn.execute("SELECT id FROM users ORDER BY id ASC LIMIT 1").fetchone()
+            uconn.close()
+            if first_user:
+                conn.execute("UPDATE history SET user_id = ? WHERE user_id = 0", (first_user[0],))
+                conn.commit()
+                logger.info(f"迁移完成：{zero_count} 条历史消息归属到 user_id={first_user[0]}")
+    except Exception:
+        pass
     
     # 创建推送日志表
     conn.execute("""
