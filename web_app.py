@@ -661,9 +661,9 @@ def is_history_duplicate(user_id: int, account_idx: int, msg_id) -> bool:
         return False
 
 
-# 启动时初始化
-init_history_db()
+# 启动时初始化（先 users 后 history，因为 history 迁移需要查 users 表）
 init_users_db()
+init_history_db()
 
 
 # ============================================================
