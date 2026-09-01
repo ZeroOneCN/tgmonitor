@@ -1535,266 +1535,278 @@ class AsyncMonitor:
         return TelegramClient(**kwargs)
 
     async def start(self):
-        self.client = self.build_client()
         account_name = self.account.get("remark", "未知")
-        rules = self.account.get("rules", [])
         webhooks = get_user_webhooks(self.user_id)
         self._stop_event.clear()
+        retry_delay = 5
 
-        try:
-            # 1. 连接 Telegram
-            await self.client.connect()
-            # 2. 检查 session 是否已授权
-            if not await self.client.is_user_authorized():
-                logger.error(f"[{account_name}] session 未授权，请先登录")
-                self.running = False
-                return
-            me = await self.client.get_me()
-            logger.info(f"[{account_name}] 监控启动: {get_display_name(me)} (id={me.id})")
-            self.running = True
-        except Exception as e:
-            logger.error(f"[{account_name}] 连接失败: {e}")
-            self.running = False
-            return
+        while not self._stop_event.is_set():
+            self.client = self.build_client()
+            rules = self.account.get("rules", [])
 
-        # 3. 注册事件处理器
-        @self.client.on(events.NewMessage())
-        async def handler(event):
-            if self._stop_event.is_set():
-                return
             try:
-                msg = event.message
-                chat = await event.get_chat()
-                sender = await event.get_sender()
-                chat_id = getattr(chat, "id", None)
-                chat_title = get_display_name(chat) if chat else "(未知)"
-                sender_id = getattr(sender, "id", None)
-                sender_username = getattr(sender, "username", None)
-                sender_name = get_display_name(sender) if sender else "(未知)"
-                text = msg.text or ""
-                # 3.6 话题组识别：提取话题 ID/名称（名称由客户端解析，失败则留空）
-                topic_id, topic_name = get_topic_info(msg)
-                if topic_id and chat_id is not None:
-                    topic_name = await self.resolve_topic_name(chat_id, topic_id)
-                # 只处理匹配规则的消息
-                matched = False
-                for rule in rules:
-                    cm = chat_matches(chat_id, chat_title, rule)
-                    if not cm:
-                        continue
-                    um = user_matches(sender_id, sender_username, rule)
-                    if not um:
-                        continue
-                    km = keyword_matches(text, rule)
-                    if not km:
-                        continue
-                    # 3.7 话题组过滤：未配置 topic_ids/topic_titles 时放行
-                    tm = topic_matches(topic_id, topic_name, rule)
-                    if not tm:
-                        logger.info(f"[{account_name}] 话题过滤未命中: chat={chat_title} topic_id={topic_id} topic={topic_name}")
-                        continue
-                    matched = True
-                    # P0-1.1 消息去重：同账号同消息已处理过则跳过转发/推送，避免重启/重连重复
-                    if is_history_duplicate(self.user_id, self.account_idx, msg.id):
-                        logger.info(f"[{account_name}] 重复消息已去重: chat={chat_title} msg_id={msg.id}")
-                        continue
-                    logger.info(f"[{account_name}] 收到消息: chat={chat_title}({chat_id}) sender={sender_name}({sender_id}) text={text[:50]}")
-                    logger.info(f"[{account_name}] 规则 '{rule.get('remark', '')}': 匹配成功")
-                    remark = rule.get("remark", "规则")
-                    alert = format_alert(event, remark, chat_title, sender_name, topic_name)
-                    logger.info(f"\n[{account_name}] {alert}")
-                    if rule.get("forward_to_saved", True):
-                        try:
-                            await self.client.forward_messages("me", msg)
-                            logger.info(f"[{account_name}] 已转发到 Saved Messages")
-                        except Exception as e:
-                            logger.error(f"[{account_name}] 转发失败: {e}")
-                    # 检测媒体类型
-                    media_type = detect_media_type(msg)
-                    has_media = bool(media_type)
-                    # 下载媒体（用于 Webhook 推送 + 网页展示存档）
-                    media_data = None
-                    media_path = ""
-                    if has_media:
-                        try:
-                            # 检查贴纸类型：动态贴纸(TGS)尝试转换为GIF
-                            sticker_mime = ""
-                            if msg.sticker:
-                                sticker_mime = (getattr(msg.sticker, "mime_type", "") or "").lower()
-                                if sticker_mime == "application/x-tgsticker":
-                                    # 下载后尝试转换为 GIF（TGS = gzip 压缩的 lottie JSON）
-                                    file_bytes_val = await self.client.download_media(msg, file=bytes)
-                                    if isinstance(file_bytes_val, bytes):
-                                        try:
-                                            from lottie.parsers.tgs import parse_tgs
-                                            from lottie.exporters.gif import export_gif
+                # 1. 连接 Telegram
+                await self.client.connect()
+                # 2. 检查 session 是否已授权
+                if not await self.client.is_user_authorized():
+                    logger.error(f"[{account_name}] session 未授权，请先登录")
+                    self.running = False
+                    return
+                me = await self.client.get_me()
+                logger.info(f"[{account_name}] 监控启动: {get_display_name(me)} (id={me.id})")
+                self.running = True
+            except Exception as e:
+                logger.error(f"[{account_name}] 连接失败: {e}")
+                self.running = False
+                if not self._stop_event.is_set():
+                    await asyncio.sleep(retry_delay)
+                continue
+
+            # 3. 注册事件处理器
+            @self.client.on(events.NewMessage())
+            async def handler(event):
+                if self._stop_event.is_set():
+                    return
+                try:
+                    msg = event.message
+                    chat = await event.get_chat()
+                    sender = await event.get_sender()
+                    chat_id = getattr(chat, "id", None)
+                    chat_title = get_display_name(chat) if chat else "(未知)"
+                    sender_id = getattr(sender, "id", None)
+                    sender_username = getattr(sender, "username", None)
+                    sender_name = get_display_name(sender) if sender else "(未知)"
+                    text = msg.text or ""
+                    # 3.6 话题组识别：提取话题 ID/名称（名称由客户端解析，失败则留空）
+                    topic_id, topic_name = get_topic_info(msg)
+                    if topic_id and chat_id is not None:
+                        topic_name = await self.resolve_topic_name(chat_id, topic_id)
+                    # 只处理匹配规则的消息
+                    matched = False
+                    for rule in rules:
+                        cm = chat_matches(chat_id, chat_title, rule)
+                        if not cm:
+                            continue
+                        um = user_matches(sender_id, sender_username, rule)
+                        if not um:
+                            continue
+                        km = keyword_matches(text, rule)
+                        if not km:
+                            continue
+                        # 3.7 话题组过滤：未配置 topic_ids/topic_titles 时放行
+                        tm = topic_matches(topic_id, topic_name, rule)
+                        if not tm:
+                            logger.info(f"[{account_name}] 话题过滤未命中: chat={chat_title} topic_id={topic_id} topic={topic_name}")
+                            continue
+                        matched = True
+                        # P0-1.1 消息去重：同账号同消息已处理过则跳过转发/推送，避免重启/重连重复
+                        if is_history_duplicate(self.user_id, self.account_idx, msg.id):
+                            logger.info(f"[{account_name}] 重复消息已去重: chat={chat_title} msg_id={msg.id}")
+                            continue
+                        logger.info(f"[{account_name}] 收到消息: chat={chat_title}({chat_id}) sender={sender_name}({sender_id}) text={text[:50]}")
+                        logger.info(f"[{account_name}] 规则 '{rule.get('remark', '')}': 匹配成功")
+                        remark = rule.get("remark", "规则")
+                        alert = format_alert(event, remark, chat_title, sender_name, topic_name)
+                        logger.info(f"\n[{account_name}] {alert}")
+                        if rule.get("forward_to_saved", True):
+                            try:
+                                await self.client.forward_messages("me", msg)
+                                logger.info(f"[{account_name}] 已转发到 Saved Messages")
+                            except Exception as e:
+                                logger.error(f"[{account_name}] 转发失败: {e}")
+                        # 检测媒体类型
+                        media_type = detect_media_type(msg)
+                        has_media = bool(media_type)
+                        # 下载媒体（用于 Webhook 推送 + 网页展示存档）
+                        media_data = None
+                        media_path = ""
+                        if has_media:
+                            try:
+                                # 检查贴纸类型：动态贴纸(TGS)尝试转换为GIF
+                                sticker_mime = ""
+                                if msg.sticker:
+                                    sticker_mime = (getattr(msg.sticker, "mime_type", "") or "").lower()
+                                    if sticker_mime == "application/x-tgsticker":
+                                        # 下载后尝试转换为 GIF（TGS = gzip 压缩的 lottie JSON）
+                                        file_bytes_val = await self.client.download_media(msg, file=bytes)
+                                        if isinstance(file_bytes_val, bytes):
                                             try:
-                                                animation = parse_tgs(BytesIO(file_bytes_val))
-                                            except Exception:
-                                                import tempfile, os
-                                                with tempfile.NamedTemporaryFile(delete=False, suffix=".tgs") as tf:
-                                                    tf.write(file_bytes_val)
-                                                    tf_path = tf.name
+                                                from lottie.parsers.tgs import parse_tgs
+                                                from lottie.exporters.gif import export_gif
                                                 try:
-                                                    animation = parse_tgs(tf_path)
-                                                finally:
+                                                    animation = parse_tgs(BytesIO(file_bytes_val))
+                                                except Exception:
+                                                    import tempfile, os
+                                                    with tempfile.NamedTemporaryFile(delete=False, suffix=".tgs") as tf:
+                                                        tf.write(file_bytes_val)
+                                                        tf_path = tf.name
                                                     try:
-                                                        os.unlink(tf_path)
-                                                    except Exception:
-                                                        pass
-                                            gif_buf = BytesIO()
-                                            export_gif(animation, gif_buf, skip_frames=6)
-                                            file_bytes_val = gif_buf.getvalue()
-                                            media_type = "gif"
-                                            sticker_mime = ""
-                                            logger.info(f"[{account_name}] 动态贴纸(TGS)已转换为GIF ({len(file_bytes_val)} bytes)")
-                                        except ImportError as e:
-                                            logger.info(f"[{account_name}] 动态贴纸(TGS)转换依赖缺失: {e}，请在服务器运行 `pip install lottie cairosvg pillow` 并重启服务")
+                                                        animation = parse_tgs(tf_path)
+                                                    finally:
+                                                        try:
+                                                            os.unlink(tf_path)
+                                                        except Exception:
+                                                            pass
+                                                gif_buf = BytesIO()
+                                                export_gif(animation, gif_buf, skip_frames=6)
+                                                file_bytes_val = gif_buf.getvalue()
+                                                media_type = "gif"
+                                                sticker_mime = ""
+                                                logger.info(f"[{account_name}] 动态贴纸(TGS)已转换为GIF ({len(file_bytes_val)} bytes)")
+                                            except ImportError as e:
+                                                logger.info(f"[{account_name}] 动态贴纸(TGS)转换依赖缺失: {e}，请在服务器运行 `pip install lottie cairosvg pillow` 并重启服务")
+                                                file_bytes_val = None
+                                            except Exception as e:
+                                                logger.warning(f"[{account_name}] 动态贴纸(TGS)转换GIF失败: {e}")
+                                                file_bytes_val = None
+                                        else:
                                             file_bytes_val = None
-                                        except Exception as e:
-                                            logger.warning(f"[{account_name}] 动态贴纸(TGS)转换GIF失败: {e}")
-                                            file_bytes_val = None
+                                    elif sticker_mime == "video/webm":
+                                        media_type = "video"  # 视频贴纸当作视频处理
+                                        file_bytes_val = await self.client.download_media(msg, file=bytes)
                                     else:
-                                        file_bytes_val = None
-                                elif sticker_mime == "video/webm":
-                                    media_type = "video"  # 视频贴纸当作视频处理
-                                    file_bytes_val = await self.client.download_media(msg, file=bytes)
+                                        file_bytes_val = await self.client.download_media(msg, file=bytes)
                                 else:
                                     file_bytes_val = await self.client.download_media(msg, file=bytes)
-                            else:
-                                file_bytes_val = await self.client.download_media(msg, file=bytes)
-                            if not isinstance(file_bytes_val, bytes):
-                                file_bytes_val = None
-                            if file_bytes_val:
-                                ext = media_ext(msg, media_type)
-                                # 存到本地 media 目录，供网页展示
-                                media_dir = BASE_DIR / "media"
-                                media_dir.mkdir(parents=True, exist_ok=True)
-                                fname = f"{msg.id}_{int(datetime.now().timestamp())}{ext}"
-                                (media_dir / fname).write_bytes(file_bytes_val)
-                                media_path = f"/media/{fname}"
-                                media_data = {"bytes": file_bytes_val, "filename": f"telegram{ext}", "media_type": media_type, "sticker_mime": sticker_mime}
-                        except Exception as e:
-                            logger.warning(f"[{account_name}] 下载媒体失败: {e}")
-                    save_history(self.user_id, account_name, self.account_idx, chat_title, chat_id,
-                                 sender_name, sender_id, text, has_media, media_type, remark, media_path, msg.id, topic_id, topic_name)
-                    # Webhook：规则级优先，有规则级则跳过全局
-                    wh_list = []
-                    if rule.get("webhook_enabled"):
-                        rw = {
-                            "enabled": True,
-                            "url": rule.get("webhook_url", ""),
-                            "telegram_bot_token": rule.get("webhook_bot_token", ""),
-                            "telegram_chat_id": rule.get("webhook_chat_id", ""),
-                        }
-                        u = rw["url"].strip()
-                        if u:
-                            wh_list.append(rw)
-                    else:
-                        for gw in (webhooks or []):
-                            u = gw.get("url", "").strip()
+                                if not isinstance(file_bytes_val, bytes):
+                                    file_bytes_val = None
+                                if file_bytes_val:
+                                    ext = media_ext(msg, media_type)
+                                    # 存到本地 media 目录，供网页展示
+                                    media_dir = BASE_DIR / "media"
+                                    media_dir.mkdir(parents=True, exist_ok=True)
+                                    fname = f"{msg.id}_{int(datetime.now().timestamp())}{ext}"
+                                    (media_dir / fname).write_bytes(file_bytes_val)
+                                    media_path = f"/media/{fname}"
+                                    media_data = {"bytes": file_bytes_val, "filename": f"telegram{ext}", "media_type": media_type, "sticker_mime": sticker_mime}
+                            except Exception as e:
+                                logger.warning(f"[{account_name}] 下载媒体失败: {e}")
+                        save_history(self.user_id, account_name, self.account_idx, chat_title, chat_id,
+                                     sender_name, sender_id, text, has_media, media_type, remark, media_path, msg.id, topic_id, topic_name)
+                        # Webhook：规则级优先，有规则级则跳过全局
+                        wh_list = []
+                        if rule.get("webhook_enabled"):
+                            rw = {
+                                "enabled": True,
+                                "url": rule.get("webhook_url", ""),
+                                "telegram_bot_token": rule.get("webhook_bot_token", ""),
+                                "telegram_chat_id": rule.get("webhook_chat_id", ""),
+                            }
+                            u = rw["url"].strip()
                             if u:
-                                wh_list.append(gw)
-                    if wh_list:
-                        asyncio.ensure_future(send_webhook_alerts(alert, wh_list, media_data, account_name, self.account_idx, remark, self.user_id))
-            except Exception as e:
-                logger.error(f"[{account_name}] 处理消息异常: {e}")
-
-        # 3.2 编辑消息监听：发送后被编辑的消息，每次编辑都作为新告警推送（不限流）
-        @self.client.on(events.MessageEdited())
-        async def edit_handler(event):
-            if self._stop_event.is_set():
-                return
-            try:
-                msg = event.message
-                chat = await event.get_chat()
-                sender = await event.get_sender()
-                chat_id = getattr(chat, "id", None)
-                chat_title = get_display_name(chat) if chat else "(未知)"
-                sender_id = getattr(sender, "id", None)
-                sender_username = getattr(sender, "username", None)
-                sender_name = get_display_name(sender) if sender else "(未知)"
-                text = msg.text or ""
-                topic_id, topic_name = get_topic_info(msg)
-                if topic_id and chat_id is not None:
-                    topic_name = await self.resolve_topic_name(chat_id, topic_id)
-                edit_time = ""
-                ed = getattr(msg, "edit_date", None)
-                if ed:
-                    try:
-                        if isinstance(ed, datetime):
-                            # 部分版本 telethon edit_date 直接返回 datetime
-                            edit_time = ed.astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                                wh_list.append(rw)
                         else:
-                            edit_time = datetime.fromtimestamp(ed, tz=SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
-                    except Exception:
-                        edit_time = str(ed)
-                for rule in rules:
-                    if not (chat_matches(chat_id, chat_title, rule) and user_matches(sender_id, sender_username, rule)
-                            and keyword_matches(text, rule) and topic_matches(topic_id, topic_name, rule)):
-                        continue
-                    # 编辑消息无需判重：用户选择每次编辑都推
-                    remark = rule.get("remark", "规则")
-                    alert = format_alert(event, remark, chat_title, sender_name, topic_name)
-                    alert += f"\n\n✏️ 该消息已被编辑（时间：{edit_time or '未知'}）"
-                    logger.info(f"\n[{account_name}] {alert}")
-                    if rule.get("forward_to_saved", True):
-                        try:
-                            await self.client.forward_messages("me", msg)
-                            logger.info(f"[{account_name}] 已转发已编辑消息到 Saved Messages")
-                        except Exception as e:
-                            logger.error(f"[{account_name}] 编辑消息转发失败: {e}")
-                    # 媒体下载（用于 Webhook 推送 + 网页展示存档）
-                    media_type = detect_media_type(msg)
-                    media_data = None
-                    media_path = ""
-                    if media_type:
-                        try:
-                            file_bytes_val = await self.client.download_media(msg, file=bytes)
-                            if isinstance(file_bytes_val, bytes) and file_bytes_val:
-                                media_dir = BASE_DIR / "media"
-                                media_dir.mkdir(parents=True, exist_ok=True)
-                                ext = media_ext(msg, media_type)
-                                fname = f"{msg.id}_{int(datetime.now().timestamp())}{ext}"
-                                (media_dir / fname).write_bytes(file_bytes_val)
-                                media_path = f"/media/{fname}"
-                                media_data = {"bytes": file_bytes_val, "filename": f"telegram{ext}", "media_type": media_type, "sticker_mime": ""}
-                        except Exception as e:
-                            logger.warning(f"[{account_name}] 编辑消息下载媒体失败: {e}")
-                    # 历史入库：文本加“已编辑”标记，前端可见
-                    save_history(self.user_id, account_name, self.account_idx, chat_title, chat_id,
-                                 sender_name, sender_id, f"✏️[已编辑] {text}", bool(media_type), media_type, remark, media_path, msg.id, topic_id, topic_name)
-                    # Webhook：规则级优先，有规则级则跳过全局
-                    wh_list = []
-                    if rule.get("webhook_enabled"):
-                        rw = {
-                            "enabled": True,
-                            "url": rule.get("webhook_url", ""),
-                            "telegram_bot_token": rule.get("webhook_bot_token", ""),
-                            "telegram_chat_id": rule.get("webhook_chat_id", ""),
-                        }
-                        u = rw["url"].strip()
-                        if u:
-                            wh_list.append(rw)
-                    else:
-                        for gw in (webhooks or []):
-                            u = gw.get("url", "").strip()
-                            if u:
-                                wh_list.append(gw)
-                    if wh_list:
-                        asyncio.ensure_future(send_webhook_alerts(alert, wh_list, media_data, account_name, self.account_idx, remark, self.user_id))
-            except Exception as e:
-                logger.error(f"[{account_name}] 处理编辑消息异常: {e}")
+                            for gw in (webhooks or []):
+                                u = gw.get("url", "").strip()
+                                if u:
+                                    wh_list.append(gw)
+                        if wh_list:
+                            asyncio.ensure_future(send_webhook_alerts(alert, wh_list, media_data, account_name, self.account_idx, remark, self.user_id))
+                except Exception as e:
+                    logger.error(f"[{account_name}] 处理消息异常: {e}")
 
-        # 4. 保持连接
-        try:
-            await self.client.run_until_disconnected()
-        except Exception as e:
-            logger.error(f"[{account_name}] 监控断开: {e}")
-        finally:
-            self.running = False
-            if self.client:
-                await self.client.disconnect()
+            # 3.2 编辑消息监听：发送后被编辑的消息，每次编辑都作为新告警推送（不限流）
+            @self.client.on(events.MessageEdited())
+            async def edit_handler(event):
+                if self._stop_event.is_set():
+                    return
+                try:
+                    msg = event.message
+                    chat = await event.get_chat()
+                    sender = await event.get_sender()
+                    chat_id = getattr(chat, "id", None)
+                    chat_title = get_display_name(chat) if chat else "(未知)"
+                    sender_id = getattr(sender, "id", None)
+                    sender_username = getattr(sender, "username", None)
+                    sender_name = get_display_name(sender) if sender else "(未知)"
+                    text = msg.text or ""
+                    topic_id, topic_name = get_topic_info(msg)
+                    if topic_id and chat_id is not None:
+                        topic_name = await self.resolve_topic_name(chat_id, topic_id)
+                    edit_time = ""
+                    ed = getattr(msg, "edit_date", None)
+                    if ed:
+                        try:
+                            if isinstance(ed, datetime):
+                                # 部分版本 telethon edit_date 直接返回 datetime
+                                edit_time = ed.astimezone(SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                            else:
+                                edit_time = datetime.fromtimestamp(ed, tz=SHANGHAI_TZ).strftime("%Y-%m-%d %H:%M:%S")
+                        except Exception:
+                            edit_time = str(ed)
+                    for rule in rules:
+                        if not (chat_matches(chat_id, chat_title, rule) and user_matches(sender_id, sender_username, rule)
+                                and keyword_matches(text, rule) and topic_matches(topic_id, topic_name, rule)):
+                            continue
+                        # 编辑消息无需判重：用户选择每次编辑都推
+                        remark = rule.get("remark", "规则")
+                        alert = format_alert(event, remark, chat_title, sender_name, topic_name)
+                        alert += f"\n\n✏️ 该消息已被编辑（时间：{edit_time or '未知'}）"
+                        logger.info(f"\n[{account_name}] {alert}")
+                        if rule.get("forward_to_saved", True):
+                            try:
+                                await self.client.forward_messages("me", msg)
+                                logger.info(f"[{account_name}] 已转发已编辑消息到 Saved Messages")
+                            except Exception as e:
+                                logger.error(f"[{account_name}] 编辑消息转发失败: {e}")
+                        # 媒体下载（用于 Webhook 推送 + 网页展示存档）
+                        media_type = detect_media_type(msg)
+                        media_data = None
+                        media_path = ""
+                        if media_type:
+                            try:
+                                file_bytes_val = await self.client.download_media(msg, file=bytes)
+                                if isinstance(file_bytes_val, bytes) and file_bytes_val:
+                                    media_dir = BASE_DIR / "media"
+                                    media_dir.mkdir(parents=True, exist_ok=True)
+                                    ext = media_ext(msg, media_type)
+                                    fname = f"{msg.id}_{int(datetime.now().timestamp())}{ext}"
+                                    (media_dir / fname).write_bytes(file_bytes_val)
+                                    media_path = f"/media/{fname}"
+                                    media_data = {"bytes": file_bytes_val, "filename": f"telegram{ext}", "media_type": media_type, "sticker_mime": ""}
+                            except Exception as e:
+                                logger.warning(f"[{account_name}] 编辑消息下载媒体失败: {e}")
+                        # 历史入库：文本加“已编辑”标记，前端可见
+                        save_history(self.user_id, account_name, self.account_idx, chat_title, chat_id,
+                                     sender_name, sender_id, f"✏️[已编辑] {text}", bool(media_type), media_type, remark, media_path, msg.id, topic_id, topic_name)
+                        # Webhook：规则级优先，有规则级则跳过全局
+                        wh_list = []
+                        if rule.get("webhook_enabled"):
+                            rw = {
+                                "enabled": True,
+                                "url": rule.get("webhook_url", ""),
+                                "telegram_bot_token": rule.get("webhook_bot_token", ""),
+                                "telegram_chat_id": rule.get("webhook_chat_id", ""),
+                            }
+                            u = rw["url"].strip()
+                            if u:
+                                wh_list.append(rw)
+                        else:
+                            for gw in (webhooks or []):
+                                u = gw.get("url", "").strip()
+                                if u:
+                                    wh_list.append(gw)
+                        if wh_list:
+                            asyncio.ensure_future(send_webhook_alerts(alert, wh_list, media_data, account_name, self.account_idx, remark, self.user_id))
+                except Exception as e:
+                    logger.error(f"[{account_name}] 处理编辑消息异常: {e}")
+
+            # 4. 保持连接
+            try:
+                await self.client.run_until_disconnected()
+            except Exception as e:
+                logger.error(f"[{account_name}] 监控断开: {e}")
+            finally:
+                self.running = False
+                if self.client:
+                    await self.client.disconnect()
+
+            # 5. 自动重连：非主动停止时等待后重试
+            if self._stop_event.is_set():
+                break
+
+            logger.info(f"[{account_name}] 连接断开，{retry_delay}秒后重连...")
+            await asyncio.sleep(retry_delay)
 
     async def stop(self):
         self._stop_event.set()
