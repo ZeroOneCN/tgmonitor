@@ -139,7 +139,20 @@ body {
 </div>
 
 <script>
-let mode = 'login'; // login / register
+	let mode = 'login'; // login / register
+	let registrationEnabled = true;
+	
+	// 检查注册开关
+	fetch('/api/public/registration-status')
+	  .then(r => r.json())
+	  .then(data => {
+	    registrationEnabled = data.registration_enabled;
+	    if (!registrationEnabled) {
+	      document.getElementById('switchLink').style.display = 'none';
+	      document.getElementById('switchText').textContent = '注册已关闭';
+	    }
+	  })
+	  .catch(() => {});
 
 function toggleMode(event) {
   if (event) event.preventDefault();

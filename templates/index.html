@@ -588,6 +588,75 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
         </div>
       </div>
     </div>
+
+    <div class="settings-section" id="admin-settings-section" style="margin-top: 20px; display:none;">
+      <h3>系统安全设置</h3>
+      <p class="text-sm mb-8">管理系统安全相关配置（仅管理员可见）。</p>
+      <div class="form-row" style="align-items: end; flex-wrap: wrap;">
+        <div class="form-group">
+          <label>用户注册</label>
+          <div class="form-check" style="margin-top: 8px;">
+            <input type="checkbox" id="registration-enabled">
+            <label for="registration-enabled">允许新用户注册</label>
+          </div>
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <button class="btn btn-primary btn-sm" onclick="saveAdminSettings()">保存安全设置</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section" id="audit-section" style="margin-top: 20px; display:none;">
+      <h3>安全审计日志</h3>
+      <p class="text-sm mb-8">记录用户登录、注册、登出等操作（仅管理员可见）。</p>
+      <div class="form-row" style="align-items: end; flex-wrap: wrap; gap: 8px;">
+        <div class="form-group">
+          <label>筛选操作类型</label>
+          <select class="form-control" id="audit-filter-action" style="min-width: 140px;">
+            <option value="">全部</option>
+            <option value="login_success">登录成功</option>
+            <option value="login_failed">登录失败</option>
+            <option value="register">注册</option>
+            <option value="register_failed">注册失败</option>
+            <option value="logout">登出</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>用户名</label>
+          <input class="form-control" id="audit-filter-username" placeholder="模糊搜索" style="width: 140px;">
+        </div>
+        <div class="form-group">
+          <label>&nbsp;</label>
+          <button class="btn btn-outline btn-sm" onclick="loadAuditLogs()">查询</button>
+          <button class="btn btn-outline btn-sm" onclick="loadAuditStats()">刷新统计</button>
+        </div>
+      </div>
+      <div class="form-row" style="gap: 16px; margin-top: 8px;">
+        <div class="text-sm" style="color: #636e72;">24h失败登录: <strong id="audit-failed-24h">-</strong></div>
+        <div class="text-sm" style="color: #636e72;">今日注册: <strong id="audit-today-reg">-</strong></div>
+        <div class="text-sm" style="color: #636e72;">总记录数: <strong id="audit-total">-</strong></div>
+      </div>
+      <div style="margin-top: 12px; max-height: 400px; overflow-y: auto; border: 1px solid #e8eaed; border-radius: 8px;">
+        <table class="history-table" style="width:100%;border-collapse:collapse;">
+          <thead>
+            <tr>
+              <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e8eaed;white-space:nowrap;">时间</th>
+              <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e8eaed;white-space:nowrap;">用户</th>
+              <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e8eaed;white-space:nowrap;">操作</th>
+              <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e8eaed;white-space:nowrap;">IP</th>
+              <th style="text-align:left;padding:8px 10px;border-bottom:2px solid #e8eaed;">详情</th>
+            </tr>
+          </thead>
+          <tbody id="audit-log-body"></tbody>
+        </table>
+      </div>
+      <div class="text-sm" style="margin-top: 8px; color: #636e72; text-align: center;">
+        <span id="audit-page-info">第 1 页</span>
+        <button class="btn btn-sm btn-outline" onclick="auditPage(-1)" style="margin-left: 8px;">上一页</button>
+        <button class="btn btn-sm btn-outline" onclick="auditPage(1)">下一页</button>
+      </div>
+    </div>
     </div>
   </section>
 
@@ -1806,6 +1875,11 @@ async function loadSettings() {
     document.getElementById('cleanup-days').value = cleanup.keep_days || 30;
     // 分享配置
     loadSharing();
+    // 管理员安全设置
+    if (currentUser && currentUser.role === 'admin') {
+      loadAdminSettings();
+      loadAuditStats();
+    }
   } catch (e) {
     console.error('加载设置失败:', e);
   }
@@ -2074,6 +2148,71 @@ async function changePassword() {
 }
 
 // ============================================================
+// 安全审计（仅管理员）
+// ============================================================
+let auditPageNum = 1;
+
+async function loadAdminSettings() {
+  try {
+    const data = await api('GET', '/api/admin/settings');
+    document.getElementById('registration-enabled').checked = !!data.registration_enabled;
+  } catch (e) { /* ignore */ }
+}
+
+async function saveAdminSettings() {
+  try {
+    await api('PUT', '/api/admin/settings', {
+      registration_enabled: document.getElementById('registration-enabled').checked,
+    });
+    toast('安全设置已保存', 'success');
+  } catch (e) {
+    toast('保存失败: ' + e.message, 'error');
+  }
+}
+
+async function loadAuditLogs() {
+  const action = document.getElementById('audit-filter-action').value;
+  const username = document.getElementById('audit-filter-username').value.trim();
+  try {
+    const data = await api('GET', '/api/admin/audit?page=' + auditPageNum + '&page_size=50&action=' + encodeURIComponent(action) + '&username=' + encodeURIComponent(username));
+    const tbody = document.getElementById('audit-log-body');
+    if (!data.logs || data.logs.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;padding:20px;color:#999;">暂无审计日志</td></tr>';
+    } else {
+      tbody.innerHTML = data.logs.map(log => {
+        const actionMap = { login_success: '登录成功', login_failed: '登录失败', register: '注册', register_failed: '注册失败', logout: '登出' };
+        const actionLabel = actionMap[log.action] || log.action;
+        const actionClass = log.action === 'login_failed' || log.action === 'register_failed' ? 'log-line ERROR' : 'log-line INFO';
+        return `<tr>
+          <td style="padding:6px 10px;border-bottom:1px solid #f0f0f0;white-space:nowrap;font-size:12px;">${escHtml(log.created_at)}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f0f0f0;white-space:nowrap;font-size:12px;">${escHtml(log.username)}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f0f0f0;white-space:nowrap;font-size:12px;"><span class="${actionClass}">${actionLabel}</span></td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f0f0f0;white-space:nowrap;font-size:12px;">${escHtml(log.ip_address)}</td>
+          <td style="padding:6px 10px;border-bottom:1px solid #f0f0f0;font-size:12px;color:#636e72;">${escHtml(log.detail)}</td>
+        </tr>`;
+      }).join('');
+    }
+    document.getElementById('audit-page-info').textContent = '第 ' + auditPageNum + ' 页（共 ' + data.total + ' 条）';
+  } catch (e) {
+    console.error('加载审计日志失败:', e);
+  }
+}
+
+async function loadAuditStats() {
+  try {
+    const data = await api('GET', '/api/admin/audit/stats');
+    document.getElementById('audit-failed-24h').textContent = data.failed_24h || 0;
+    document.getElementById('audit-today-reg').textContent = data.today_registrations || 0;
+    document.getElementById('audit-total').textContent = data.total || 0;
+  } catch (e) { /* ignore */ }
+}
+
+function auditPage(delta) {
+  auditPageNum = Math.max(1, auditPageNum + delta);
+  loadAuditLogs();
+}
+
+// ============================================================
 // 实时日志 (WebSocket)
 // ============================================================
 function connectLogWs() {
@@ -2148,6 +2287,10 @@ async function initAuth() {
         document.getElementById('tab-btn-users').style.display = '';
         const s = document.getElementById('service-status-section');
         if (s) s.style.display = '';
+        const as = document.getElementById('admin-settings-section');
+        if (as) as.style.display = '';
+        const au = document.getElementById('audit-section');
+        if (au) au.style.display = '';
       }
     }
   } catch (e) { /* 未登录由后端重定向处理 */ }

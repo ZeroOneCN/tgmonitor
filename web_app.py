@@ -256,6 +256,35 @@ def init_users_db():
                 conn.execute(ddl)
     except Exception:
         pass
+    # 审计日志表
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS login_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            username TEXT NOT NULL,
+            ip_address TEXT NOT NULL DEFAULT '',
+            action TEXT NOT NULL,
+            user_agent TEXT DEFAULT '',
+            detail TEXT DEFAULT '',
+            created_at TEXT DEFAULT (datetime('now', 'localtime'))
+        )
+    """)
+    # 系统级配置表（注册开关等）
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS system_config (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    # 默认开启注册
+    conn.execute("INSERT OR IGNORE INTO system_config (key, value) VALUES ('registration_enabled', '1')")
+    # 为 login_audit 建索引
+    try:
+        idx_cols = [r[1] for r in conn.execute("PRAGMA index_list(login_audit)").fetchall()]
+        if "idx_audit_created" not in idx_cols:
+            conn.execute("CREATE INDEX idx_audit_created ON login_audit(created_at DESC)")
+    except Exception:
+        pass
     conn.commit()
     conn.close()
     migrate_legacy_config()
@@ -452,6 +481,53 @@ def verify_session(request: Request):
     token = request.cookies.get("session_token", "")
     row = get_user_by_token(token)
     return _row_to_dict(row) if row else None
+
+
+# ============================================================
+# 安全审计：登录 IP 记录 / 系统配置
+# ============================================================
+def get_client_ip(request: Request) -> str:
+    """获取客户端 IP，优先取 X-Forwarded-For（兼容 nginx 反代）"""
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    client = request.client
+    return client.host if client else ""
+
+
+def log_audit(request: Request, user_id, username, action, detail=""):
+    """记录一条审计日志"""
+    ip = get_client_ip(request)
+    ua = request.headers.get("user-agent", "")
+    conn = sqlite3.connect(str(USERS_DB_PATH))
+    try:
+        conn.execute(
+            "INSERT INTO login_audit (user_id, username, ip_address, action, user_agent, detail) VALUES (?, ?, ?, ?, ?, ?)",
+            (user_id, username, ip, action, ua, detail),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_system_config(key: str, default=None):
+    """读取系统级配置"""
+    conn = sqlite3.connect(str(USERS_DB_PATH))
+    try:
+        row = conn.execute("SELECT value FROM system_config WHERE key = ?", (key,)).fetchone()
+        return row[0] if row else default
+    finally:
+        conn.close()
+
+
+def set_system_config(key: str, value: str):
+    """写入系统级配置"""
+    conn = sqlite3.connect(str(USERS_DB_PATH))
+    try:
+        conn.execute("INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _user_ctx(request: Request):
@@ -1971,12 +2047,19 @@ async def login(request: Request):
         if len(password) < 6:
             return {"status": "error", "message": "密码长度至少6位"}
         create_user(username, password, role="admin")
+        user = verify_user(username, password)
+        token = create_session(user["id"])
+        log_audit(request, user["id"], username, "login_success", "首次初始化管理员登录")
+        return {"status": "ok", "token": token, "username": user["username"], "role": user["role"]}
     user = verify_user(username, password)
     if user is None:
+        log_audit(request, None, username, "login_failed", "用户名或密码错误")
         return {"status": "error", "message": "用户名或密码错误"}
     if user["banned"]:
+        log_audit(request, user["id"], username, "login_failed", f"账号已封禁：{user['ban_reason'] or '未填写'}")
         return {"status": "error", "message": f"账号已被封禁，无法登录。原因：{user['ban_reason'] or '未填写'}"}
     token = create_session(user["id"])
+    log_audit(request, user["id"], username, "login_success", "登录成功")
     return {"status": "ok", "token": token, "username": user["username"], "role": user["role"]}
 
 
@@ -1997,10 +2080,20 @@ async def setup(request: Request):
     return {"status": "ok", "token": token, "message": "管理员账号设置成功"}
 
 
+@app.get("/api/public/registration-status")
+async def public_registration_status():
+    """公开接口：返回注册开关状态（登录页使用，无需认证）"""
+    enabled = get_system_config("registration_enabled", "1") == "1"
+    return {"registration_enabled": enabled}
+
+
 @app.post("/api/logout")
 async def logout(request: Request):
     token = request.cookies.get("session_token", "")
     if token:
+        user = get_user_by_token(token)
+        if user:
+            log_audit(request, user["id"], user["username"], "logout", "用户登出")
         delete_session(token)
     return {"status": "ok"}
 
@@ -2012,6 +2105,10 @@ async def logout(request: Request):
 async def register(request: Request):
     if verify_session(request):
         return {"status": "error", "message": "请先退出当前账号"}
+    # 检查注册开关
+    if get_system_config("registration_enabled", "1") != "1":
+        log_audit(request, None, "", "register_failed", "注册已关闭")
+        return {"status": "error", "message": "管理员已关闭注册功能"}
     data = await request.json()
     username = data.get("username", "").strip()
     password = data.get("password", "").strip()
@@ -2026,7 +2123,9 @@ async def register(request: Request):
     except HTTPException as e:
         return {"status": "error", "message": e.detail}
     logger.info(f"[多租户] 新用户注册: {username}")
-    token = create_session(get_user_by_username(username)["id"])
+    new_user = get_user_by_username(username)
+    log_audit(request, new_user["id"], username, "register", "用户注册成功")
+    token = create_session(new_user["id"])
     return {"status": "ok", "token": token, "username": username, "role": "user"}
 
 
@@ -2341,6 +2440,85 @@ def change_password(request: Request, data: dict):
         conn.close()
     logger.info(f"[用户] {user['username']} 修改了自己的密码")
     return {"status": "ok", "message": "密码修改成功"}
+
+
+# ============================================================
+# 安全审计 API（仅管理员）
+# ============================================================
+@app.get("/api/admin/audit")
+async def get_audit_logs(request: Request, page: int = 1, page_size: int = 50,
+                          action: str = "", username: str = ""):
+    _require_admin(request)
+    conn = sqlite3.connect(str(USERS_DB_PATH))
+    conn.row_factory = sqlite3.Row
+    try:
+        conditions = []
+        params = []
+        if action:
+            conditions.append("action = ?")
+            params.append(action)
+        if username:
+            conditions.append("username LIKE ?")
+            params.append(f"%{username}%")
+        where = "WHERE " + " AND ".join(conditions) if conditions else ""
+        total = conn.execute(f"SELECT COUNT(*) FROM login_audit {where}", params).fetchone()[0]
+        offset = (page - 1) * page_size
+        rows = conn.execute(
+            f"SELECT * FROM login_audit {where} ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            params + [page_size, offset],
+        ).fetchall()
+        logs = [dict(r) for r in rows]
+        return {"total": total, "page": page, "page_size": page_size, "logs": logs}
+    finally:
+        conn.close()
+
+
+@app.get("/api/admin/audit/stats")
+async def get_audit_stats(request: Request):
+    _require_admin(request)
+    conn = sqlite3.connect(str(USERS_DB_PATH))
+    try:
+        # 最近24小时失败登录次数
+        failed_24h = conn.execute(
+            "SELECT COUNT(*) FROM login_audit WHERE action='login_failed' AND created_at >= datetime('now', '-1 day', 'localtime')"
+        ).fetchone()[0]
+        # 各IP失败次数TOP10
+        ip_failures = conn.execute(
+            "SELECT ip_address, COUNT(*) as cnt FROM login_audit WHERE action='login_failed' AND ip_address != '' "
+            "GROUP BY ip_address ORDER BY cnt DESC LIMIT 10"
+        ).fetchall()
+        # 今日注册数
+        today_reg = conn.execute(
+            "SELECT COUNT(*) FROM login_audit WHERE action='register' AND created_at >= datetime('now', '0 day', 'localtime')"
+        ).fetchone()[0]
+        # 总审计记录数
+        total = conn.execute("SELECT COUNT(*) FROM login_audit").fetchone()[0]
+        return {
+            "failed_24h": failed_24h,
+            "ip_failures": [{"ip": r[0], "count": r[1]} for r in ip_failures],
+            "today_registrations": today_reg,
+            "total": total,
+        }
+    finally:
+        conn.close()
+
+
+@app.get("/api/admin/settings")
+async def get_admin_settings(request: Request):
+    _require_admin(request)
+    return {
+        "registration_enabled": get_system_config("registration_enabled", "1") == "1",
+    }
+
+
+@app.put("/api/admin/settings")
+async def update_admin_settings(request: Request, data: dict):
+    _require_admin(request)
+    if "registration_enabled" in data:
+        val = "1" if data["registration_enabled"] else "0"
+        set_system_config("registration_enabled", val)
+        logger.info(f"[安全审计] 管理员修改注册开关: {'开启' if val == '1' else '关闭'}")
+    return {"status": "ok"}
 
 
 # 全局鉴权中间件：未登录跳转 /login
