@@ -251,6 +251,7 @@ def init_users_db():
             ("ban_reason", "ALTER TABLE users ADD COLUMN ban_reason TEXT DEFAULT ''"),
             ("banned_at", "ALTER TABLE users ADD COLUMN banned_at TEXT DEFAULT ''"),
             ("sharing", "ALTER TABLE users ADD COLUMN sharing TEXT DEFAULT '{}'"),
+            ("monitor", "ALTER TABLE users ADD COLUMN monitor TEXT DEFAULT '{}'"),
         ]:
             if col not in ucols:
                 conn.execute(ddl)
@@ -432,15 +433,19 @@ def get_user_config(row) -> dict:
     if row is None:
         cfg = default_config()
         cfg["sharing"] = {"enabled": False, "token": "", "password": "", "filter_type": "all", "filter_ids": []}
+        cfg["monitor"] = {"restart_interval": 0}
         return cfg
     sharing = json.loads(row["sharing"] or "{}")
     sharing = {**{"enabled": False, "token": "", "password": "", "filter_type": "all", "filter_ids": []}, **sharing}
+    monitor = json.loads(row["monitor"] or "{}") if "monitor" in row.keys() else {}
+    monitor = {**{"restart_interval": 0}, **monitor}
     return {
         "accounts": json.loads(row["accounts"] or "[]"),
         "webhooks": json.loads(row["webhooks"] or "[]"),
         "cleanup": json.loads(row["cleanup"] or "{}"),
         "rule_templates": json.loads(row["rule_templates"] or "[]"),
         "sharing": sharing,
+        "monitor": monitor,
     }
 
 
@@ -448,12 +453,13 @@ def save_user_config(user_id: int, cfg: dict):
     conn = _users_conn()
     try:
         conn.execute(
-            "UPDATE users SET accounts=?, webhooks=?, cleanup=?, rule_templates=?, sharing=? WHERE id=?",
+            "UPDATE users SET accounts=?, webhooks=?, cleanup=?, rule_templates=?, sharing=?, monitor=? WHERE id=?",
             (json.dumps(cfg.get("accounts", []), ensure_ascii=False),
              json.dumps(cfg.get("webhooks", []), ensure_ascii=False),
              json.dumps(cfg.get("cleanup", {}), ensure_ascii=False),
              json.dumps(cfg.get("rule_templates", []), ensure_ascii=False),
              json.dumps(cfg.get("sharing", {}), ensure_ascii=False),
+             json.dumps(cfg.get("monitor", {}), ensure_ascii=False),
              user_id),
         )
         conn.commit()
@@ -1537,15 +1543,7 @@ def format_alert(event, rule_remark, chat_title, sender_name, topic_name=""):
         text = text[:MAX_TEXT] + " ..."
     mt = detect_media_type(msg)
     mt_cn = MEDIA_CN.get(mt, mt) if mt else ""
-    title = "[Telegram 消息转发]"
-    meta_parts = [f"规则:{rule_remark}"]
-    if chat_title:
-        meta_parts.append(f"来源:{chat_title}")
-    if topic_name:
-        meta_parts.append(f"话题:{topic_name}")
-    if sender_name:
-        meta_parts.append(f"发送者:{sender_name}")
-    meta_line = " | ".join(meta_parts)
+    timestamp = datetime.now(SHANGHAI_TZ).strftime("%m-%d %H:%M")
     has_text = bool(msg.text and msg.text.strip())
     if mt and not has_text:
         content_line = f"({mt_cn})"
@@ -1553,7 +1551,18 @@ def format_alert(event, rule_remark, chat_title, sender_name, topic_name=""):
         content_line = f"{text} ({mt_cn})"
     else:
         content_line = text if text else "(无文本)"
-    return f"{title}\n{meta_line}\n{'—' * 12}\n{content_line}"
+    # 正文置顶：让通知栏直接看到消息；来源与会话信息压到末尾
+    src = chat_title or "未知来源"
+    if topic_name:
+        src += f" · {topic_name}"
+    meta_parts = []
+    if rule_remark:
+        meta_parts.append(f"规则:{rule_remark}")
+    if sender_name:
+        meta_parts.append(f"发送者:{sender_name}")
+    meta_parts.append(timestamp)
+    meta_line = " | ".join(meta_parts)
+    return f"{content_line}\n{'—' * 12}\n{src}\n{meta_line}"
 
 
 # ============================================================
@@ -1615,6 +1624,15 @@ class AsyncMonitor:
         webhooks = get_user_webhooks(self.user_id)
         self._stop_event.clear()
         retry_delay = 5
+        # 自动重启间隔：账号级优先，其次用户全局默认；0=关闭
+        self._restart_interval = int(self.account.get("restart_interval") or 0)
+        if self._restart_interval <= 0:
+            owner = get_user_by_id(self.user_id)
+            if owner is not None:
+                user_cfg = get_user_config(owner)
+                self._restart_interval = int((user_cfg.get("monitor") or {}).get("restart_interval") or 0)
+        if self._restart_interval and self._restart_interval > 0:
+            logger.info(f"[{account_name}] 自动重启间隔: {self._restart_interval}分钟")
 
         while not self._stop_event.is_set():
             self.client = self.build_client()
@@ -1867,9 +1885,20 @@ class AsyncMonitor:
                 except Exception as e:
                     logger.error(f"[{account_name}] 处理编辑消息异常: {e}")
 
-            # 4. 保持连接
-            try:
+            async def _keep_connected():
                 await self.client.run_until_disconnected()
+
+            # 4. 保持连接 + 自动重启间隔：到时间主动断开，走下方重连循环
+            interval = self._restart_interval
+            timeout = interval * 60 if interval and interval > 0 else None
+            try:
+                if timeout:
+                    await asyncio.wait_for(_keep_connected(), timeout=timeout)
+                    logger.info(f"[{account_name}] 达到自动重启间隔({interval}分钟)，主动重启...")
+                else:
+                    await _keep_connected()
+            except asyncio.TimeoutError:
+                logger.info(f"[{account_name}] 达到自动重启间隔({interval}分钟)，主动重启...")
             except Exception as e:
                 logger.error(f"[{account_name}] 监控断开: {e}")
             finally:
@@ -2556,6 +2585,7 @@ async def list_accounts(request: Request):
             "api_hash": acc.get("api_hash", ""),
             "proxy": acc.get("proxy", {"scheme": "", "host": "", "port": 0}),
             "rules": acc.get("rules", []),
+            "restart_interval": acc.get("restart_interval", 0),
             "running": status_map.get(i, False),
             "session_valid": sess.get("valid", False),
             "session_name": sess.get("display_name", ""),
@@ -2572,6 +2602,7 @@ def add_account(request: Request, data: dict):
         "api_id": data.get("api_id", 2040),
         "api_hash": data.get("api_hash", ""),
         "proxy": data.get("proxy", {"scheme": "", "host": "", "port": 0, "username": "", "password": ""}),
+        "restart_interval": int(data.get("restart_interval") or 0),
         "rules": [],
     }
     cfg["accounts"].append(account)
@@ -2597,6 +2628,8 @@ def update_account(idx: int, request: Request, data: dict):
         acc["api_hash"] = data["api_hash"]
     if "proxy" in data:
         acc["proxy"] = data["proxy"]
+    if "restart_interval" in data:
+        acc["restart_interval"] = int(data.get("restart_interval") or 0)
     save_user_config(user_id, cfg)
     logger.info(f"[user={user_id}] 已更新账号: {acc.get('remark', '')}")
     return {"status": "ok"}
@@ -2953,6 +2986,7 @@ def get_settings(request: Request):
     return {
         "webhooks": cfg["webhooks"],
         "cleanup": cfg["cleanup"],
+        "monitor": cfg.get("monitor") or {"restart_interval": 0},
     }
 
 
@@ -2963,6 +2997,13 @@ def update_settings(request: Request, data: dict):
         cfg["webhooks"] = data["webhooks"]
     if "cleanup" in data:
         cfg["cleanup"] = data["cleanup"]
+    if "monitor" in data:
+        mon = cfg.get("monitor") or {}
+        if isinstance(data["monitor"], dict):
+            if "restart_interval" in data["monitor"]:
+                val = data["monitor"]["restart_interval"]
+                mon["restart_interval"] = int(val or 0)
+        cfg["monitor"] = mon
     save_user_config(user_id, cfg)
     logger.info(f"[user={user_id}] 已更新设置")
     return {"status": "ok"}

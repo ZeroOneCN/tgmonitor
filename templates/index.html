@@ -14,66 +14,142 @@ body {
   text-rendering: optimizeLegibility;
 }
 
-/* 顶部导航 */
-header {
-  background: #fff; padding: 0 24px; display: flex;
-  align-items: center; justify-content: space-between;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.08); height: 56px;
-  position: sticky; top: 0; z-index: 100;
+/* =============================
+   中后台布局：深色侧边栏 + 顶栏
+   ============================= */
+:root {
+  --primary: #4A90D9;
+  --primary-hover: #367fce;
+  --bg: #f4f6fb;
+  --surface: #fff;
+  --border: #e9edf3;
+  --text: #232930;
+  --text-2: #6b7686;
+  --text-3: #a5aebd;
+  --sidebar-bg: #1c2531;
+  --sidebar-border: rgba(255,255,255,.06);
+  --sidebar-w: 224px;
+  --topbar-h: 60px;
+  --radius: 12px;
+  --shadow-sm: 0 1px 2px rgba(23,32,48,.05), 0 1px 6px rgba(23,32,48,.05);
 }
-header h1 {
-  font-size: 18px; font-weight: 600; color: #2d3436;
-  letter-spacing: 0.5px; display: flex; align-items: center; gap: 10px;
-}
-header h1 img { width: 28px; height: 28px; }
-header h1 span { color: #4A90D9; }
-nav { display: flex; gap: 2px; height: 100%; }
-.tab-btn {
-  background: transparent; color: #636e72; border: none;
-  padding: 0 20px; cursor: pointer; font-size: 14px;
-  font-weight: 500; transition: all 0.2s;
-  border-bottom: 2px solid transparent;
-}
-.tab-btn:hover { color: #4A90D9; background: #f0f4ff; }
-.tab-btn.active { color: #4A90D9; border-bottom-color: #4A90D9; }
+html, body { height: 100%; }
+body { background: var(--bg); }
 
-/* 右上角用户下拉菜单 */
-.user-menu-wrap { position: relative; }
-.user-menu-trigger {
-  font-size: 13px; color: #636e72; cursor: pointer;
-  padding: 6px 10px; border-radius: 6px; user-select: none;
-  transition: all 0.2s;
+/* ---- 整体布局 ---- */
+.layout { display: flex; min-height: 100vh; }
+
+/* ---- 侧边栏 ---- */
+.sidebar {
+  width: var(--sidebar-w); background: var(--sidebar-bg);
+  color: #9aa6b5; position: fixed; left: 0; top: 0; bottom: 0;
+  display: flex; flex-direction: column; z-index: 200;
+  transition: width .22s ease; overflow: hidden;
 }
-.user-menu-trigger:hover { background: #f0f4ff; color: #2d3436; }
-.user-menu {
-  display: none; position: absolute; top: 34px; right: 0;
-  background: #fff; border-radius: 10px; min-width: 140px;
-  box-shadow: 0 4px 16px rgba(0,0,0,0.12); padding: 6px 0;
-  z-index: 200; border: 1px solid #eef1f5;
+.sidebar .brand {
+  height: var(--topbar-h); display: flex; align-items: center; gap: 12px;
+  padding: 0 20px; flex-shrink: 0; border-bottom: 1px solid var(--sidebar-border);
 }
-.user-menu.open { display: block; animation: menuIn 0.15s ease; }
-@keyframes menuIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
-.user-menu-item {
-  padding: 10px 16px; font-size: 13px; color: #2d3436;
-  cursor: pointer; transition: background 0.15s;
+.sidebar .brand img { width: 30px; height: 30px; border-radius: 8px; flex-shrink: 0; }
+.sidebar .brand .brand-txt { color: #fff; font-size: 15px; font-weight: 600; white-space: nowrap; }
+.nav-links { flex: 1; padding: 14px 10px; overflow-y: auto; }
+
+/* 侧边栏导航项 */
+.tab-btn {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  padding: 11px 12px; margin-bottom: 4px; text-align: left;
+  background: transparent; color: #9aa6b5; border: none; border-radius: 9px;
+  font-size: 14px; font-weight: 500; cursor: pointer; white-space: nowrap;
+  position: relative; transition: background .18s, color .18s;
 }
-.user-menu-item:hover { background: #f0f4ff; }
-.user-menu-item--danger { color: #e74c3c; }
-.user-menu-item--danger:hover { background: #fef0f0; }
+.tab-btn .t-ico { width: 22px; height: 22px; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center; }
+.tab-btn .t-ico svg { width: 20px; height: 20px; }
+.tab-btn:hover { background: rgba(255,255,255,.07); color: #e7ecf3; }
+.tab-btn.active { background: var(--primary); color: #fff; box-shadow: 0 6px 16px rgba(74,144,217,.35); }
+.tab-btn.active .t-ico svg { color: #fff; }
+
+/* 折叠态：仅图标 */
+.sidebar.collapsed { width: 64px; }
+.sidebar.collapsed .brand { justify-content: center; padding: 0; }
+.sidebar.collapsed .brand-txt { display: none; }
+.sidebar.collapsed .nav-links { padding: 14px 8px; }
+.sidebar.collapsed .tab-btn { justify-content: center; padding: 11px 0; }
+.sidebar.collapsed .t-label, .sidebar.collapsed .tab-badge-wrap { display: none; }
+.sidebar.collapsed .sidebar-foot .collapse-tip { display: none; }
+
+/* 侧边栏底部：折叠/展开按钮 */
+.sidebar-foot { border-top: 1px solid var(--sidebar-border); padding: 12px 10px; flex-shrink: 0; }
+.side-collapse-btn {
+  display: flex; align-items: center; gap: 12px; width: 100%;
+  padding: 10px 12px; background: transparent; color: #9aa6b5;
+  border: none; border-radius: 9px; cursor: pointer; font-size: 14px;
+  transition: background .18s;
+}
+.side-collapse-btn:hover { background: rgba(255,255,255,.07); color: #e7ecf3; }
+.sidebar.collapsed .side-collapse-btn { justify-content: center; padding: 10px 0; }
+
+/* 导航未读角标 */
+.tab-badge-wrap { margin-left: auto; display: inline-flex; align-items: center; }
+.tab-badge { min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px;
+  background: #e5484d; color: #fff; font-size: 11px; font-weight: 600;
+  line-height: 18px; text-align: center; box-shadow: 0 1px 3px rgba(229,72,77,.4); }
+.tab-btn.active .tab-badge { background: #fff; color: var(--primary); }
+
+/* ---- 右侧主区域 ---- */
+.layout-main { flex: 1; display: flex; flex-direction: column; min-width: 0;
+  margin-left: var(--sidebar-w); transition: margin-left .22s ease; }
+.sidebar.collapsed ~ .layout-main { margin-left: 64px; }
+
+/* ---- 顶栏 ---- */
+.topbar {
+  height: var(--topbar-h); background: var(--surface); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 0 20px; gap: 12px; position: sticky; top: 0; z-index: 100;
+}
+.topbar-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.topbar-left h1 { font-size: 17px; font-weight: 600; color: var(--text); white-space: nowrap; }
+.menu-toggle { display: none; background: none; border: 1px solid var(--border); border-radius: 8px;
+  width: 36px; height: 36px; cursor: pointer; align-items: center; justify-content: center;
+  flex-shrink: 0; color: var(--text-2); }
+.menu-toggle:hover { background: var(--bg); }
+.topbar-right { display: flex; align-items: center; gap: 8px; }
 
 /* 连接状态灯 */
-.conn-status { display:flex; align-items:center; gap:6px; margin-right:14px; font-size:12px; color:#8a94a6; flex-shrink:0; }
+.conn-status { display:flex; align-items:center; gap:6px; padding:6px 10px; border-radius:8px;
+  background:var(--bg); font-size:12px; color:#8a94a6; flex-shrink:0; }
 .conn-dot { width:9px; height:9px; border-radius:50%; background:#dcdde1; transition:background .3s, box-shadow .3s; }
 .conn-status.online .conn-dot { background:#2ecc71; box-shadow:0 0 0 3px rgba(46,204,113,.18); }
 .conn-status.offline .conn-dot { background:#e74c3c; box-shadow:0 0 0 3px rgba(231,76,60,.18); }
 .conn-status.reconnecting .conn-dot { background:#f1c40f; box-shadow:0 0 0 3px rgba(241,196,15,.2); animation:pulse 1.2s infinite; }
 @keyframes pulse { 50% { opacity:.4; } }
 
-/* 标签页未读角标 */
-.tab-btn { position: relative; }
-.tab-badge { position:absolute; top:7px; right:7px; min-width:17px; height:17px; padding:0 4px;
-  border-radius:9px; background:#e74c3c; color:#fff; font-size:11px; line-height:17px;
-  text-align:center; font-weight:600; box-shadow:0 1px 3px rgba(231,76,60,.4); }
+/* 用户下拉菜单 */
+.user-menu-wrap { position: relative; flex-shrink: 0; }
+.user-menu-trigger {
+  font-size: 13px; color: var(--text-2); cursor: pointer;
+  padding: 7px 10px; border-radius: 8px; user-select: none;
+  display: flex; align-items: center; gap: 6px; transition: all .18s;
+}
+.user-menu-trigger .av {
+  width: 26px; height: 26px; border-radius: 50%; background: var(--primary); color: #fff;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 600;
+}
+.user-menu-trigger:hover { background: var(--bg); color: var(--text); }
+.user-menu {
+  display: none; position: absolute; top: 40px; right: 0;
+  background: var(--surface); border-radius: 10px; min-width: 150px;
+  box-shadow: 0 8px 24px rgba(23,32,48,.14); padding: 6px;
+  z-index: 200; border: 1px solid var(--border);
+}
+.user-menu.open { display: block; animation: menuIn 0.15s ease; }
+@keyframes menuIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: translateY(0); } }
+.user-menu-item {
+  padding: 9px 12px; font-size: 13px; color: var(--text); border-radius: 8px;
+  cursor: pointer; transition: background 0.15s;
+}
+.user-menu-item:hover { background: var(--bg); }
+.user-menu-item--danger { color: #e5484d; }
+.user-menu-item--danger:hover { background: #fdf0f0; }
 
 /* 迷你趋势图 */
 .sparkline { width:100%; height:44px; display:block; margin-top:12px; }
@@ -334,12 +410,30 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
 /* 表格横向滚动容器 */
 .table-scroll { overflow-x: auto; }
 
-/* 响应式 */
+/* 响应式：窄屏侧边栏变为抽屉，顶栏显示菜单按钮 */
+@media (max-width: 900px) {
+  .layout-main { margin-left: 0 !important; }
+  .menu-toggle { display: inline-flex; }
+  .sidebar {
+    transform: translateX(-100%); width: var(--sidebar-w) !important;
+    box-shadow: 0 8px 32px rgba(0,0,0,.25); transition: transform .25s ease, width .22s ease;
+  }
+  body.side-open .sidebar { transform: translateX(0); }
+  .sidebar-scrim { display: none; position: fixed; inset: 0; background: rgba(15,20,30,.4); z-index: 190; }
+  body.side-open .sidebar-scrim { display: block; }
+  .sidebar.collapsed .t-label, .sidebar.collapsed .tab-badge-wrap { display: inline-flex; }
+  .sidebar.collapsed .brand-txt { display: block; }
+  .sidebar.collapsed .brand { justify-content: flex-start; padding: 0 20px; }
+  .sidebar.collapsed .nav-links { padding: 14px 10px; }
+  .sidebar.collapsed .tab-btn { justify-content: flex-start; padding: 11px 12px; }
+  .sidebar.collapsed .side-collapse-btn { justify-content: flex-start; padding: 10px 12px; }
+  .sidebar.collapsed .sidebar-foot .collapse-tip { display: block; }
+}
 @media (max-width: 640px) {
-  header { flex-direction: column; height: auto; padding: 10px 16px; gap: 6px; }
-  header h1 { font-size: 15px; }
-  nav { width: 100%; justify-content: center; flex-wrap: wrap; gap: 2px; }
-  .tab-btn { flex: 1 1 30%; text-align: center; font-size: 12px; padding: 8px 2px; }
+  .topbar { padding: 0 12px; }
+  .topbar-left h1 { font-size: 15px; }
+  .conn-label { display: none; }
+  .user-menu-trigger > span.name { display: none; }
   main { padding: 16px; }
   .account-header { flex-direction: column; align-items: flex-start; gap: 10px; }
   .account-actions { width: 100%; }
@@ -364,30 +458,73 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
 </head>
 <body>
 
-<header>
-  <h1><img src="/logo.svg" alt="Telegram"> Telegram 群聊频道消息监控后台</h1>
-  <nav>
-    <button class="tab-btn active" onclick="switchTab('accounts')">账号管理</button>
-    <button class="tab-btn" onclick="switchTab('stats')">数据统计</button>
-    <button class="tab-btn" onclick="switchTab('history')">历史消息</button>
-    <button class="tab-btn" onclick="switchTab('logs')">实时日志<span class="tab-badge" id="tab-badge-logs" style="display:none"></span></button>
-    <button class="tab-btn" onclick="switchTab('settings')">系统设置</button>
-    <button class="tab-btn" id="tab-btn-users" onclick="switchTab('users')" style="display:none;">用户管理</button>
-  </nav>
-  <div class="conn-status" id="conn-status" title="服务连接状态">
-    <span class="conn-dot" id="conn-dot"></span>
-    <span class="conn-label" id="conn-label">连接中</span>
-  </div>
-  <div class="user-menu-wrap" style="position:relative;flex-shrink:0;">
-    <span id="current-user" class="user-menu-trigger" onclick="toggleUserMenu(event)"></span>
-    <div id="user-menu" class="user-menu">
-      <div class="user-menu-item" onclick="showChangePasswordModal()">修改密码</div>
-      <div class="user-menu-item user-menu-item--danger" onclick="logout()">退出登录</div>
-    </div>
-  </div>
-</header>
+<div class="layout">
+  <div class="sidebar-scrim" onclick="closeSidebar()"></div>
 
-<main>
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">
+      <img src="/logo.svg" alt="Telegram">
+      <span class="brand-txt">Telegram 监控后台</span>
+    </div>
+    <nav class="nav-links">
+      <button class="tab-btn active" data-title="账号管理" onclick="switchTab('accounts')">
+        <span class="t-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
+        <span class="t-label">账号管理</span>
+      </button>
+      <button class="tab-btn" data-title="数据统计" onclick="switchTab('stats')">
+        <span class="t-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg></span>
+        <span class="t-label">数据统计</span>
+      </button>
+      <button class="tab-btn" data-title="历史消息" onclick="switchTab('history')">
+        <span class="t-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg></span>
+        <span class="t-label">历史消息</span>
+      </button>
+      <button class="tab-btn" data-title="实时日志" onclick="switchTab('logs')">
+        <span class="t-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg></span>
+        <span class="t-label">实时日志</span>
+        <span class="tab-badge-wrap"><span class="tab-badge" id="tab-badge-logs" style="display:none"></span></span>
+      </button>
+      <button class="tab-btn" data-title="系统设置" onclick="switchTab('settings')">
+        <span class="t-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg></span>
+        <span class="t-label">系统设置</span>
+      </button>
+      <button class="tab-btn" id="tab-btn-users" data-title="用户管理" onclick="switchTab('users')" style="display:none;">
+        <span class="t-ico"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg></span>
+        <span class="t-label">用户管理</span>
+      </button>
+    </nav>
+    <div class="sidebar-foot">
+      <button class="side-collapse-btn" onclick="toggleSidebarCollapse(event)">
+        <span class="t-ico" id="collapse-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg></span>
+        <span class="collapse-tip">收起菜单</span>
+      </button>
+    </div>
+  </aside>
+
+  <div class="layout-main">
+    <header class="topbar">
+      <div class="topbar-left">
+        <button class="menu-toggle" onclick="openSidebar()" aria-label="打开菜单">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
+        <h1 id="page-title">账号管理</h1>
+      </div>
+      <div class="topbar-right">
+        <div class="conn-status" id="conn-status" title="服务连接状态">
+          <span class="conn-dot" id="conn-dot"></span>
+          <span class="conn-label" id="conn-label">连接中</span>
+        </div>
+        <div class="user-menu-wrap">
+          <span id="current-user" class="user-menu-trigger" onclick="toggleUserMenu(event)"></span>
+          <div id="user-menu" class="user-menu">
+            <div class="user-menu-item" onclick="showChangePasswordModal()">修改密码</div>
+            <div class="user-menu-item user-menu-item--danger" onclick="logout()">退出登录</div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main>
   <!-- 账号管理 -->
   <section id="tab-accounts" class="tab-content active">
     <div class="toolbar">
@@ -508,6 +645,18 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
         <div class="form-group">
           <label>&nbsp;</label>
           <button class="btn btn-outline btn-sm" onclick="runCleanupNow()">立即清理</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section" style="margin-top: 20px;">
+      <h3>监控自动重启</h3>
+      <p class="text-sm mb-8">设置监控运行的全局默认重启间隔；单个账号可在账号编辑里单独设置，账号级优先于这里。</p>
+      <div class="form-row" style="align-items: end; flex-wrap: wrap;">
+        <div class="form-group">
+          <label>全局默认重启间隔（分钟）</label>
+          <input class="form-control" id="monitor-restart" type="number" min="0" value="0" style="width: 160px;">
+          <span class="hint">0=关闭；监控运行满该时长会自动断线重启</span>
         </div>
       </div>
     </div>
@@ -830,6 +979,9 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
   </section>
 </main>
 
+  </div><!-- /.layout-main -->
+</div><!-- /.layout -->
+
 <!-- 添加/编辑账号模态框 -->
 <div class="modal-overlay" id="account-modal">
   <div class="modal">
@@ -865,6 +1017,13 @@ hr { border: none; border-top: 1px solid #e8eaed; margin: 16px 0; }
       <div class="form-group">
         <label>端口</label>
         <input class="form-control" id="acc-proxy-port" placeholder="10090">
+      </div>
+    </div>
+    <div class="form-row">
+      <div class="form-group">
+        <label>自动重启间隔（分钟）</label>
+        <input class="form-control" id="acc-restart" type="number" min="0" placeholder="0=关闭，留空用全局默认">
+        <span class="hint">监控运行满该时长会主动断线重启；0或留空则用系统设置的全局默认</span>
       </div>
     </div>
     <input type="hidden" id="acc-edit-idx" value="-1">
@@ -1197,6 +1356,10 @@ function switchTab(name) {
   if (btn) btn.classList.add('active');
   document.getElementById(`tab-${name}`).classList.add('active');
   currentTab = name;
+  const pt = document.getElementById('page-title');
+  if (pt && btn) pt.textContent = btn.getAttribute('data-title') || btn.textContent.trim();
+  // 窄屏切换后收起抽屉
+  if (window.innerWidth <= 900) closeSidebar();
   if (name === 'logs') { logUnread = 0; updateLogBadge(); }
   if (name === 'accounts') loadAccounts();
   if (name === 'settings') loadSettings();
@@ -1209,6 +1372,39 @@ function switchTab(name) {
 // ============================================================
 function openModal(id) { document.getElementById(id).classList.add('active'); }
 function closeModal(id) { document.getElementById(id).classList.remove('active'); }
+
+// ============================================================
+// 侧边栏：抽屉(移动端) / 折叠(桌面端)
+// ============================================================
+function openSidebar() { document.body.classList.add('side-open'); }
+function closeSidebar() {
+  document.body.classList.remove('side-open');
+  if (window.innerWidth <= 900) closeUserMenu();
+}
+function toggleSidebarCollapse(e) {
+  if (e) e.stopPropagation();
+  const sb = document.getElementById('sidebar');
+  sb.classList.toggle('collapsed');
+  const tip = document.querySelector('.collapse-tip');
+  const ico = document.getElementById('collapse-icon');
+  // 折叠时切换箭头方向与提示文字
+  const collapsed = sb.classList.contains('collapsed');
+  if (tip) tip.textContent = collapsed ? '展开菜单' : '收起菜单';
+  if (ico) ico.innerHTML = collapsed
+    ? '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>'
+    : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>';
+  try { localStorage.setItem('sidebarCollapsed', collapsed ? '1' : '0'); } catch (err) {}
+}
+// 恢复侧边栏折叠偏好
+(function restoreSidebar() {
+  try {
+    if (localStorage.getItem('sidebarCollapsed') === '1') {
+      const sb = document.getElementById('sidebar');
+      if (sb) { sb.classList.add('collapsed'); const tip = document.querySelector('.collapse-tip'); if (tip) tip.textContent = '展开菜单';
+        const ico = document.getElementById('collapse-icon'); if (ico) ico.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"/></svg>'; }
+    }
+  } catch (err) {}
+})();
 
 // 历史消息媒体预览：图片/贴纸/GIF/视频/PDF 均在本页弹窗打开
 function openMedia(type, path) {
@@ -1305,7 +1501,7 @@ function renderAccountCard(acc, idx) {
     : '';
 
   return `
-    <div class="account-card">
+    <div class="account-card" data-accid="${acc.id}">
       <div class="account-header">
         <div class="account-left">
           <div>
@@ -1324,7 +1520,7 @@ function renderAccountCard(acc, idx) {
           }
         </div>
       </div>
-      <div class="proxy-info">代理: ${proxyText}</div>
+      <div class="proxy-info">代理: ${proxyText}${acc.restart_interval > 0 ? ` · 自动重启: ${acc.restart_interval}分钟` : ''}</div>
       ${ruleHtml}
       <button class="btn btn-outline btn-sm mt-8" onclick="showAddRule(${idx})">+ 添加规则</button>
     </div>
@@ -1375,7 +1571,7 @@ function formatPlatform(p) {
 function showAddAccount() {
   document.getElementById('account-modal-title').textContent = '添加账号';
   document.getElementById('acc-edit-idx').value = '-1';
-  ['acc-remark','acc-phone','acc-api-hash'].forEach(id => document.getElementById(id).value = '');
+  ['acc-remark','acc-phone','acc-api-hash','acc-restart'].forEach(id => document.getElementById(id).value = '');
   document.getElementById('acc-api-id').value = '2040';
   document.getElementById('acc-proxy-scheme').value = '';
   document.getElementById('acc-proxy-host').value = '';
@@ -1396,6 +1592,7 @@ function editAccount(idx) {
     document.getElementById('acc-proxy-scheme').value = proxy.scheme || '';
     document.getElementById('acc-proxy-host').value = proxy.host || '';
     document.getElementById('acc-proxy-port').value = proxy.port || '';
+    document.getElementById('acc-restart').value = acc.restart_interval || '';
     openModal('account-modal');
   });
 }
@@ -1414,6 +1611,7 @@ async function saveAccount() {
 
   const data = {
     remark, phone, api_id: parseInt(api_id) || 2040, api_hash,
+    restart_interval: parseInt(document.getElementById('acc-restart').value) || 0,
     proxy: {
       scheme: document.getElementById('acc-proxy-scheme').value.trim() || 'socks5',
       host: document.getElementById('acc-proxy-host').value.trim() || '127.0.0.1',
@@ -1873,6 +2071,9 @@ async function loadSettings() {
     const cleanup = s.cleanup || {};
     document.getElementById('cleanup-enabled').checked = !!cleanup.enabled;
     document.getElementById('cleanup-days').value = cleanup.keep_days || 30;
+    // 监控自动重启（全局默认）
+    const mon = s.monitor || {};
+    document.getElementById('monitor-restart').value = mon.restart_interval || 0;
     // 分享配置
     loadSharing();
     // 管理员安全设置
@@ -1988,9 +2189,13 @@ async function saveSettings() {
       enabled: document.getElementById('cleanup-enabled').checked,
       keep_days: parseInt(document.getElementById('cleanup-days').value || '30', 10) || 30,
     };
+    const mon = {
+      restart_interval: parseInt(document.getElementById('monitor-restart').value || '0', 10) || 0,
+    };
     await api('PUT', '/api/settings', {
       webhooks,
       cleanup,
+      monitor: mon,
     });
     setBtnLoading(btn, false);
     toast('设置已保存', 'success');
@@ -2281,8 +2486,9 @@ async function initAuth() {
     const userEl = document.getElementById('current-user');
     if (data.authenticated) {
       currentUser = { username: data.username, role: data.role };
-      const roleText = data.role === 'admin' ? ' <span style="color:#e67e22;">(管理员)</span>' : '';
-      userEl.innerHTML = '&#128100; ' + escHtml(data.username) + roleText;
+      const name = escHtml(data.username) + (data.role === 'admin' ? ' <span style="color:#e67e22;">(管理员)</span>' : '');
+      const initial = (data.username || 'U').charAt(0).toUpperCase();
+      userEl.innerHTML = `<span class="av">${escHtml(initial)}</span><span class="name">${name}</span>`;
       if (data.role === 'admin') {
         document.getElementById('tab-btn-users').style.display = '';
         const s = document.getElementById('service-status-section');
@@ -2540,6 +2746,56 @@ loadAccounts();
 connectLogWs();
 loadHistoryAccounts();
 if (window.location.hash === '#users') { loadAdminOverview(); loadUsers(); }
+
+// ============================================================
+// 流程优化：服务心跳 + 账号状态自动刷新
+// 1) 每 20s 探测服务可用性，服务不可达时顶栏状态灯显示离线
+// 2) 停留在账号页时每 30s 静默刷新一次运行状态，避免"监控掉了不知道"
+// ============================================================
+(async function heartbeat() {
+  const el = document.getElementById('conn-status');
+  const probe = async () => {
+    try {
+      await api('GET', '/api/check_auth', null);
+      // 服务可达：若日志 WS 已断开仅置为 reconnecting，否则保持在线
+      if (el && !el.classList.contains('online')) setConnStatus('reconnecting');
+      return true;
+    } catch (e) {
+      if (el) { el.classList.remove('online', 'reconnecting'); setConnStatus('offline'); }
+      return false;
+    }
+  };
+  // 初次探测 + 定时
+  setTimeout(probe, 1500);
+  const hb = setInterval(async () => {
+    if (currentTab === 'accounts' && await probe()) {
+      // 仅静默刷新运行状态，避免打断用户操作
+      fetch('/api/accounts')
+        .then(r => r.json())
+        .then(list => {
+          const cards = document.querySelectorAll('.account-card');
+          if (list && Array.isArray(list) && cards.length) {
+            cards.forEach(card => {
+              const idEl = card.querySelector('[data-accid]');
+              const id = idEl ? idEl.getAttribute('data-accid') : null;
+              const match = list.find(a => String(a.id) === String(id));
+              if (match) {
+                const badge = card.querySelector('.status-badge');
+                const running = match.running === true;
+                const sessionValid = match.session_valid === true;
+                let cls, txt;
+                if (running) { cls = 'status-running'; txt = '&#x1F7E2; 监控中'; }
+                else if (sessionValid) { cls = 'status-loggedin'; txt = '&#x1F535; 已登录'; }
+                else { cls = 'status-nosession'; txt = '&#x26AA; 未登录'; }
+                if (badge) { badge.className = 'status-badge ' + cls; badge.innerHTML = txt; }
+              }
+            });
+          }
+        })
+        .catch(() => {});
+    }
+  }, 30000);
+})();
 
 // ============================================================
 // 退出登录
