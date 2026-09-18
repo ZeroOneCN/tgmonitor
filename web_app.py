@@ -1577,6 +1577,8 @@ class AsyncMonitor:
         self.running = False
         self._stop_event = asyncio.Event()
         self._topic_cache: dict = {}
+        # 最后收到任意更新的时间（看门狗据此判定更新流是否已死）
+        self.last_update_ts = time.time()
 
     async def resolve_topic_name(self, chat_id, topic_id):
         """根据群组 ID + 话题 ID 解析话题名称（带缓存），失败返回空串"""
@@ -1634,6 +1636,16 @@ class AsyncMonitor:
         if self._restart_interval and self._restart_interval > 0:
             logger.info(f"[{account_name}] 自动重启间隔: {self._restart_interval}分钟")
 
+        # 看门狗阈值：多久收不到任何更新就判定更新流已死（分钟，可配置）
+        stale_min = int(self.account.get("stale_update_minutes") or 0)
+        if stale_min <= 0:
+            owner = get_user_by_id(self.user_id)
+            if owner is not None:
+                stale_min = int((get_user_config(owner).get("monitor") or {})
+                                .get("stale_update_minutes") or 0)
+        stale_sec = (stale_min if stale_min > 0 else 30) * 60
+        logger.info(f"[{account_name}] 更新流看门狗: {stale_sec//60} 分钟无更新即强制重连")
+
         while not self._stop_event.is_set():
             self.client = self.build_client()
             rules = self.account.get("rules", [])
@@ -1657,6 +1669,12 @@ class AsyncMonitor:
                 continue
 
             # 3. 注册事件处理器
+            @self.client.on(events.Raw())
+            async def _hb(update):
+                # 任何更新都是「更新流活着」的证据（包括不匹配规则的群消息），
+                # 供看门狗判断连接是否只是「TCP 活着但更新流已死」
+                self.last_update_ts = time.time()
+
             @self.client.on(events.NewMessage())
             async def handler(event):
                 if self._stop_event.is_set():
@@ -1888,9 +1906,37 @@ class AsyncMonitor:
             async def _keep_connected():
                 await self.client.run_until_disconnected()
 
+            async def _watchdog():
+                """看门狗：连接存活但「更新流」已死时主动断开，触发外层重连。
+
+                为什么必须有：run_until_disconnected() 只在 TCP 断开时返回。
+                当 Telegram 侧限流/更新通道卡死、而 TCP 仍 ESTABLISHED 时，
+                它永远不会返回 —— 监控静默卡死数小时，进程却一切显示正常
+                （实测事故：日志停在 11:25，systemd 显示已在线 18 小时）。
+                """
+                while not self._stop_event.is_set():
+                    await asyncio.sleep(60)
+                    idle = time.time() - self.last_update_ts
+                    if idle >= stale_sec:
+                        logger.warning(
+                            f"[{account_name}] 已 {idle/60:.0f} 分钟无任何更新，"
+                            f"判定更新流已死 → 强制重连")
+                        break
+                    try:   # 主动探活：真死连接会在这里暴露
+                        await asyncio.wait_for(self.client.get_me(), timeout=30)
+                    except Exception as e:
+                        logger.warning(f"[{account_name}] 探活失败({e}) → 强制重连")
+                        break
+                try:
+                    await self.client.disconnect()
+                except Exception:
+                    pass
+
             # 4. 保持连接 + 自动重启间隔：到时间主动断开，走下方重连循环
             interval = self._restart_interval
             timeout = interval * 60 if interval and interval > 0 else None
+            self.last_update_ts = time.time()      # 刚连上，重置静默计时
+            wd = asyncio.create_task(_watchdog())
             try:
                 if timeout:
                     await asyncio.wait_for(_keep_connected(), timeout=timeout)
@@ -1902,6 +1948,7 @@ class AsyncMonitor:
             except Exception as e:
                 logger.error(f"[{account_name}] 监控断开: {e}")
             finally:
+                wd.cancel()
                 self.running = False
                 if self.client:
                     await self.client.disconnect()
@@ -2037,6 +2084,53 @@ monitor_mgr = MonitorManager()
 # FastAPI 应用
 # ============================================================
 app = FastAPI(title="Telegram 监控管理后台", version="2.0.0")
+
+
+@app.on_event("startup")
+async def _auto_start_monitors():
+    """服务启动后自动恢复监控。
+
+    监控启停原本只能从网页点击触发、且无任何持久化：服务一重启
+    （升级 / 重启 / 宕机恢复），监控就再也不会自己起来，而且外部毫无提示
+    —— 实测事故：重启后日志只剩一条「自动备份任务已启动」，两个账号全停，
+    用户发现时已经 3 个多小时没推送。
+
+    用环境变量 TG_AUTO_START_MONITORS=0 可关闭该行为。
+    """
+    if os.getenv("TG_AUTO_START_MONITORS", "1").strip().lower() in ("0", "false", "no", "off"):
+        logger.info("[自动恢复] 已通过 TG_AUTO_START_MONITORS 关闭")
+        return
+    await asyncio.sleep(1)          # 等事件循环就绪
+    try:
+        uconn = _users_conn()
+        users = uconn.execute("SELECT id, banned, accounts FROM users").fetchall()
+    except Exception as e:
+        logger.error(f"[自动恢复] 读取用户失败: {e}")
+        return
+
+    ok = skipped = 0
+    for u in users:
+        if u["banned"]:
+            continue
+        try:
+            accounts = json.loads(u["accounts"] or "[]")
+        except Exception:
+            continue
+        for idx in range(len(accounts)):
+            if not str(accounts[idx].get("phone") or "").strip():
+                continue
+            try:
+                res = await monitor_mgr.start_monitor(u["id"], idx)
+                if res.get("status") in ("started", "already_running"):
+                    ok += 1
+                else:
+                    skipped += 1
+                    logger.warning(
+                        f"[自动恢复] 用户{u['id']} 账号[{idx}] 未启动: {res.get('message')}")
+            except Exception as e:
+                skipped += 1
+                logger.warning(f"[自动恢复] 用户{u['id']} 账号[{idx}] 启动异常: {e}")
+    logger.info(f"[自动恢复] 已自动恢复 {ok} 个账号的监控（跳过 {skipped} 个）")
 
 # ============================================================
 # Auth API - 登录登出
