@@ -5,9 +5,13 @@ config.json
 session_*.session
 session_*.session-journal
 
-# 数据库
+# 数据库（含定时备份快照）
+*.db
+*.db-wal
+*.db-shm
 history.db
 users.db
+backups/
 
 # 日志文件
 *.log
