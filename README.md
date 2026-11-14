@@ -14,17 +14,18 @@
 | `templates/index.html` | Web 前端页面 |
 | `templates/login.html` | 登录页面 |
 | `templates/setup.html` | 首次初始化管理员页面 |
+| `templates/share.html` | 消息分享页（无需登录，可设访问密码） |
 | `tg_helper.py` | 辅助工具：查 chat_id / user_id |
-| `tests/` | 核心逻辑回归测试（pytest） |
 | `config.json` | 配置文件（Web 界面自动管理） |
 | `users.db` | 用户/会话数据库（多租户，自动生成） |
 | `requirements.txt` | 依赖列表 |
-| `requirements-dev.txt` | 开发/测试依赖（生产不需要） |
 | `ecosystem.config.js` | PM2 进程管理配置 |
 | `tg-monitor.nginx.conf` | Nginx 反向代理配置示例 |
 | session_xxx.session | 登录会话文件（每个账号各一个，自动生成） |
 | history.db | 历史消息记录数据库（自动生成） |
 | monitor.log | 运行日志 |
+
+> `tests/` 与 `requirements-dev.txt` 仅保留在本地开发环境，不随仓库分发。
 
 ---
 
@@ -33,7 +34,7 @@
 ### 1. 安装依赖
 
 ```bash
-cd tgmonitor
+cd 007一款电报群消息监控小工具   # 进入本工具目录
 pip install -r requirements.txt
 ```
 
@@ -153,9 +154,12 @@ export TG_AUTO_START_MONITORS=0
 
 ### 测试
 
+回归测试仅保留在本地开发环境，**不随仓库分发**（`tests/` 与 `requirements-dev.txt` 已列入 `.gitignore`）。
+本地已有测试目录时：
+
 ```bash
-pip install -r requirements-dev.txt
-pytest -q
+pip install pytest httpx
+pytest tests -q
 ```
 
 ---
