@@ -48,3 +48,7 @@ media/
 
 # 测试缓存
 .pytest_cache/
+
+# 本地测试（不纳入仓库，仅在本地运行）
+tests/
+requirements-dev.txt
