@@ -217,8 +217,7 @@ document.getElementById('loginForm').addEventListener('submit', async (e) => {
     });
     const data = await res.json();
     if (data.status === 'ok') {
-      // 设置 cookie 并重定向到首页
-      document.cookie = `session_token=${data.token}; path=/; max-age=31536000; SameSite=Lax`;
+      // 会话 Cookie 由服务端下发（HttpOnly，JS 不可读写），此处只需跳转
       window.location.href = '/';
     } else {
       errorMsg.textContent = data.message || (mode === 'register' ? '注册失败' : '登录失败');

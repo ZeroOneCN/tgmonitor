@@ -42,3 +42,9 @@ Thumbs.db
 
 # 媒体存档
 media/
+
+# 工作区本地数据（记忆 / 会话缓存）
+.workbuddy/
+
+# 测试缓存
+.pytest_cache/

@@ -2804,7 +2804,6 @@ async function logout() {
   if (!await showConfirm('确定退出登录？')) return;
   try {
     await api('POST', '/api/logout', {});
-    document.cookie = 'session_token=; path=/; max-age=0';
     window.location.href = '/login';
   } catch (e) {
     showAlert('退出失败: ' + e.message);

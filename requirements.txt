@@ -1,13 +1,18 @@
+# ---- 运行必需 ----
 telethon>=1.36.0
-python-telegram-bot[job-queue]>=21.0
-httpx>=0.27
-win10toast>=0.9; sys_platform == 'win32'
-plyer>=2.1
-pysocks>=1.7
-customtkinter>=5.2
 fastapi>=0.110.0
 uvicorn>=0.29.0
+
+# ---- 媒体处理（图片压缩 / 动态贴纸 TGS→GIF） ----
 Pillow>=10.0.0
 lottie>=0.7.2
 cairosvg>=2.7.0
+
+# ---- 代理支持（SOCKS5） ----
+pysocks>=1.7
+
+# ---- 定时任务（历史清理 / 自动备份） ----
 APScheduler>=3.10.0,<4
+
+# 已移除（GUI 时代遗留，web_app.py 与 tg_helper.py 中均未导入）：
+#   customtkinter, plyer, win10toast, httpx, python-telegram-bot

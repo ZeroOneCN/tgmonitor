@@ -6,6 +6,7 @@ Telegram 多账号监控工具 - Web 管理后台 (FastAPI)
 """
 
 import asyncio
+import contextvars
 import csv
 import hashlib
 import hmac
@@ -13,21 +14,22 @@ import io
 import json
 import logging
 import os
-import time
-import sqlite3
-import hashlib
 import secrets
 import shutil
+import sqlite3
+import threading
+import time
 import urllib.parse
 import urllib.request
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from io import BytesIO
 from pathlib import Path
 from typing import Optional
 
 import uvicorn
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request
-from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, StreamingResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse, FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError
@@ -38,13 +40,29 @@ HISTORY_DB_PATH = BASE_DIR / "history.db"
 SHANGHAI_TZ = timezone(timedelta(hours=8))
 SESSION_SECRET = secrets.token_hex(32)
 
-# 分享页访问鉴权（可选密码）：用 HMAC 签发一次性访问令牌
-SHARE_AUTH_SECRET = "tgmonitor-share-auth-v1"
+# 分享页访问鉴权（可选密码）：用 HMAC 签发访问令牌
+# 密钥不再硬编码（硬编码等于全网共用同一把钥匙），首次使用时随机生成并持久化到 users.db
+SHARE_AUTH_SECRET = ""
+
+
+def _share_secret() -> str:
+    global SHARE_AUTH_SECRET
+    if SHARE_AUTH_SECRET:
+        return SHARE_AUTH_SECRET
+    try:
+        val = get_system_config("share_auth_secret", "")
+        if not val:
+            val = secrets.token_hex(32)
+            set_system_config("share_auth_secret", val)
+        SHARE_AUTH_SECRET = val
+    except Exception:
+        SHARE_AUTH_SECRET = secrets.token_hex(32)
+    return SHARE_AUTH_SECRET
 
 
 def _share_sign(token: str, password: str) -> str:
     """对 token+密码 做 HMAC 签名"""
-    return hmac.new(SHARE_AUTH_SECRET.encode(), f"{token}:{password}".encode(), hashlib.sha256).hexdigest()
+    return hmac.new(_share_secret().encode(), f"{token}:{password}".encode(), hashlib.sha256).hexdigest()
 
 
 def _share_auth_valid(token: str, sharing: dict, auth: str = "") -> bool:
@@ -56,6 +74,11 @@ def _share_auth_valid(token: str, sharing: dict, auth: str = "") -> bool:
 
 # 进程启动时间，用于计算系统正常运行时间
 _PROCESS_START_TS = time.time()
+
+# 当前日志归属的用户（None = 系统级日志，仅管理员可见）。
+# asyncio 任务会复制创建时的上下文，因此监控协程里 set 一次，
+# 其内部所有 logger 调用都能正确归属到对应用户。
+_log_ctx_user: contextvars.ContextVar[Optional[int]] = contextvars.ContextVar("log_user_id", default=None)
 
 
 def _fmt_uptime(seconds: float) -> str:
@@ -186,16 +209,15 @@ class ConfigManager:
 
     def set_admin_password(self, username: str, password: str):
         salt = secrets.token_hex(16)
-        pwd_hash = hashlib.sha256((password + salt).encode()).hexdigest()
-        self.cfg["admin"] = {"username": username, "password_hash": pwd_hash, "password_salt": salt}
+        self.cfg["admin"] = {"username": username, "password_hash": hash_password(password, salt), "password_salt": salt}
         self.save()
 
     def verify_admin(self, username: str, password: str) -> bool:
         admin = self.get_admin()
         if not admin.get("password_hash") or not admin.get("password_salt"):
             return False
-        pwd_hash = hashlib.sha256((password + admin["password_salt"]).encode()).hexdigest()
-        return username == admin.get("username", "") and pwd_hash == admin["password_hash"]
+        ok, _ = verify_password(password, admin["password_salt"], admin["password_hash"])
+        return username == admin.get("username", "") and ok
 
     def is_admin_configured(self) -> bool:
         admin = self.get_admin()
@@ -216,7 +238,7 @@ USERS_DB_PATH = BASE_DIR / "users.db"
 # ============================================================
 def init_users_db():
     USERS_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(USERS_DB_PATH))
+    conn = _users_conn()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -294,7 +316,7 @@ def init_users_db():
 def migrate_legacy_config():
     """首次使用：把历史 config.json 里的管理员/账号/通知迁移到 users 表。
     若 users 表为空且 config.json 已配置过账号，则创建首个 admin 用户承载这些数据。"""
-    conn = sqlite3.connect(str(USERS_DB_PATH))
+    conn = _users_conn()
     conn.row_factory = sqlite3.Row
     try:
         cnt = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
@@ -310,7 +332,7 @@ def migrate_legacy_config():
         if not pwd_hash:
             # 历史无管理员但有账号：生成一个默认口令 "admin123"
             salt = secrets.token_hex(16)
-            pwd_hash = hashlib.sha256(("admin123" + salt).encode()).hexdigest()
+            pwd_hash = hash_password("admin123", salt)
             pwd_salt = salt
         conn.execute(
             "INSERT INTO users (username, password_hash, password_salt, role, accounts, webhooks, cleanup, rule_templates) "
@@ -324,7 +346,7 @@ def migrate_legacy_config():
         admin_id = conn.execute("SELECT id FROM users WHERE username = ?", (username,)).fetchone()["id"]
         # 历史 history 数据归属到新 admin 用户
         try:
-            hist = sqlite3.connect(str(HISTORY_DB_PATH))
+            hist = _history_conn()
             hist.execute("UPDATE history SET user_id = ? WHERE user_id = 0", (admin_id,))
             hist.commit()
             hist.close()
@@ -336,14 +358,59 @@ def migrate_legacy_config():
         conn.close()
 
 
-def _users_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(str(USERS_DB_PATH))
+def _db_connect(path) -> sqlite3.Connection:
+    """统一的 SQLite 连接工厂。
+
+    多账号监控 + 页面查询会同时写库，默认的 rollback journal 很容易抛
+    "database is locked"。统一开 WAL + busy_timeout，读写互不阻塞。
+    """
+    conn = sqlite3.connect(str(path), timeout=30)
     conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=15000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.Error:
+        pass
     return conn
 
 
+def _users_conn() -> sqlite3.Connection:
+    return _db_connect(USERS_DB_PATH)
+
+
+def _history_conn() -> sqlite3.Connection:
+    return _db_connect(HISTORY_DB_PATH)
+
+
+PBKDF2_ITERATIONS = 260000
+
+
 def hash_password(password: str, salt: str) -> str:
-    return hashlib.sha256((password + salt).encode()).hexdigest()
+    """PBKDF2-HMAC-SHA256 派生，格式 pbkdf2_sha256$迭代数$hex。
+
+    旧版是单轮 sha256(密码+盐)，显卡每秒能试几十亿次；这里升级为带迭代的 KDF，
+    verify_password() 兼容旧格式并在登录成功后自动改写为新格式。
+    """
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), PBKDF2_ITERATIONS)
+    return f"pbkdf2_sha256${PBKDF2_ITERATIONS}${dk.hex()}"
+
+
+def verify_password(password: str, salt: str, stored: str) -> tuple[bool, bool]:
+    """校验密码，返回 (是否通过, 是否需要升级哈希)。"""
+    if not stored:
+        return False, False
+    if stored.startswith("pbkdf2_sha256$"):
+        try:
+            _, iters, digest = stored.split("$", 2)
+            dk = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), int(iters))
+            return hmac.compare_digest(dk.hex(), digest), int(iters) < PBKDF2_ITERATIONS
+        except (ValueError, TypeError):
+            return False, False
+    # 旧格式：单轮 sha256(密码+盐)
+    legacy = hashlib.sha256((password + salt).encode()).hexdigest()
+    return hmac.compare_digest(legacy, stored), True
+
 
 
 def create_user(username: str, password: str, role: str = "user"):
@@ -382,9 +449,41 @@ def verify_user(username: str, password: str):
     row = get_user_by_username(username)
     if not row:
         return None
-    if row["password_salt"] and hash_password(password, row["password_salt"]) == row["password_hash"]:
-        return row
-    return None
+    if not row["password_salt"]:
+        return None
+    ok, need_upgrade = verify_password(password, row["password_salt"], row["password_hash"])
+    if not ok:
+        return None
+    if need_upgrade:
+        # 旧 sha256 哈希在登录成功后透明升级，用户无感知
+        try:
+            conn = _users_conn()
+            try:
+                conn.execute(
+                    "UPDATE users SET password_hash = ? WHERE id = ?",
+                    (hash_password(password, row["password_salt"]), row["id"]),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            logger.info(f"[安全] 用户 {username} 的密码哈希已升级为 PBKDF2")
+        except Exception as e:
+            logger.warning(f"[安全] 密码哈希升级失败: {e}")
+    return row
+
+
+def get_user_id_by_token(token: str):
+    """轻量查询：只取 token 对应的用户 id，用于日志归属绑定"""
+    if not token:
+        return None
+    conn = _users_conn()
+    try:
+        row = conn.execute(
+            "SELECT user_id FROM sessions WHERE token = ?", (token,)
+        ).fetchone()
+        return row["user_id"] if row else None
+    finally:
+        conn.close()
 
 
 def create_session(user_id: int) -> str:
@@ -449,22 +548,27 @@ def get_user_config(row) -> dict:
     }
 
 
+_config_write_lock = threading.Lock()
+
+
 def save_user_config(user_id: int, cfg: dict):
-    conn = _users_conn()
-    try:
-        conn.execute(
-            "UPDATE users SET accounts=?, webhooks=?, cleanup=?, rule_templates=?, sharing=?, monitor=? WHERE id=?",
-            (json.dumps(cfg.get("accounts", []), ensure_ascii=False),
-             json.dumps(cfg.get("webhooks", []), ensure_ascii=False),
-             json.dumps(cfg.get("cleanup", {}), ensure_ascii=False),
-             json.dumps(cfg.get("rule_templates", []), ensure_ascii=False),
-             json.dumps(cfg.get("sharing", {}), ensure_ascii=False),
-             json.dumps(cfg.get("monitor", {}), ensure_ascii=False),
-             user_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
+    """整列 JSON 覆盖写：多请求并发时后写会覆盖前写，因此串行化"""
+    with _config_write_lock:
+        conn = _users_conn()
+        try:
+            conn.execute(
+                "UPDATE users SET accounts=?, webhooks=?, cleanup=?, rule_templates=?, sharing=?, monitor=? WHERE id=?",
+                (json.dumps(cfg.get("accounts", []), ensure_ascii=False),
+                 json.dumps(cfg.get("webhooks", []), ensure_ascii=False),
+                 json.dumps(cfg.get("cleanup", {}), ensure_ascii=False),
+                 json.dumps(cfg.get("rule_templates", []), ensure_ascii=False),
+                 json.dumps(cfg.get("sharing", {}), ensure_ascii=False),
+                 json.dumps(cfg.get("monitor", {}), ensure_ascii=False),
+                 user_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def get_user_webhooks(user_id: int) -> list:
@@ -505,7 +609,7 @@ def log_audit(request: Request, user_id, username, action, detail=""):
     """记录一条审计日志"""
     ip = get_client_ip(request)
     ua = request.headers.get("user-agent", "")
-    conn = sqlite3.connect(str(USERS_DB_PATH))
+    conn = _users_conn()
     try:
         conn.execute(
             "INSERT INTO login_audit (user_id, username, ip_address, action, user_agent, detail) VALUES (?, ?, ?, ?, ?, ?)",
@@ -518,7 +622,7 @@ def log_audit(request: Request, user_id, username, action, detail=""):
 
 def get_system_config(key: str, default=None):
     """读取系统级配置"""
-    conn = sqlite3.connect(str(USERS_DB_PATH))
+    conn = _users_conn()
     try:
         row = conn.execute("SELECT value FROM system_config WHERE key = ?", (key,)).fetchone()
         return row[0] if row else default
@@ -528,7 +632,7 @@ def get_system_config(key: str, default=None):
 
 def set_system_config(key: str, value: str):
     """写入系统级配置"""
-    conn = sqlite3.connect(str(USERS_DB_PATH))
+    conn = _users_conn()
     try:
         conn.execute("INSERT OR REPLACE INTO system_config (key, value) VALUES (?, ?)", (key, value))
         conn.commit()
@@ -549,7 +653,7 @@ def _user_ctx(request: Request):
 # ============================================================
 def init_history_db():
     HISTORY_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    conn = _history_conn()
     conn.execute("""
         CREATE TABLE IF NOT EXISTS history (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -608,7 +712,7 @@ def init_history_db():
     try:
         zero_count = conn.execute("SELECT COUNT(*) FROM history WHERE user_id = 0").fetchone()[0]
         if zero_count > 0:
-            uconn = sqlite3.connect(str(USERS_DB_PATH))
+            uconn = _users_conn()
             first_user = uconn.execute("SELECT id FROM users ORDER BY id ASC LIMIT 1").fetchone()
             uconn.close()
             if first_user:
@@ -685,7 +789,7 @@ def init_history_db():
 def save_history(user_id: int, account_name: str, account_idx: int, chat_title: str, chat_id, sender_name: str, sender_id, text: str, has_media: bool, media_type: str, rule_remark: str, media_path: str = "", msg_id=None, topic_id="", topic_name=""):
     """保存历史消息，返回 True 表示新插入，False 表示重复已忽略"""
     try:
-        conn = sqlite3.connect(str(HISTORY_DB_PATH))
+        conn = _history_conn()
         cur = conn.execute(
             "INSERT OR IGNORE INTO history (ts, user_id, account_name, account_idx, chat_title, chat_id, sender_name, sender_id, text, has_media, media_type, media_path, rule_remark, msg_id, topic_id, topic_name) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             [
@@ -732,7 +836,7 @@ def is_history_duplicate(user_id: int, account_idx: int, msg_id) -> bool:
     if msg_id is None:
         return False
     try:
-        conn = sqlite3.connect(str(HISTORY_DB_PATH))
+        conn = _history_conn()
         row = conn.execute(
             "SELECT 1 FROM history WHERE user_id = ? AND account_idx = ? AND msg_id = ? LIMIT 1",
             (int(user_id), int(account_idx), str(msg_id)),
@@ -791,6 +895,54 @@ def start_backup_scheduler():
         logger.error(f"启动自动备份任务失败: {e}")
 
 
+def _delete_media_files(media_paths: list) -> int:
+    """删除 media_path 指向的本地文件，返回实际删除数"""
+    media_dir = (BASE_DIR / "media").resolve()
+    removed = 0
+    for mp in media_paths:
+        if not mp:
+            continue
+        name = str(mp).rsplit("/", 1)[-1]
+        fp = (media_dir / name).resolve()
+        try:
+            if os.path.commonpath([str(media_dir), str(fp)]) != str(media_dir):
+                continue
+            if fp.is_file():
+                fp.unlink()
+                removed += 1
+        except (OSError, ValueError):
+            continue
+    return removed
+
+
+def purge_orphan_media(min_age_seconds: int = 3600) -> int:
+    """清掉 media 目录里没有历史记录引用的孤儿文件（旧版本只写不删，会一直涨）"""
+    media_dir = (BASE_DIR / "media").resolve()
+    if not media_dir.is_dir():
+        return 0
+    conn = _history_conn()
+    try:
+        rows = conn.execute("SELECT media_path FROM history WHERE media_path <> ''").fetchall()
+    finally:
+        conn.close()
+    known = {str(r["media_path"]).rsplit("/", 1)[-1] for r in rows}
+    now = time.time()
+    removed = 0
+    for fp in media_dir.iterdir():
+        if not fp.is_file() or fp.name in known:
+            continue
+        try:
+            if now - fp.stat().st_mtime < min_age_seconds:
+                continue   # 刚落盘、可能还没入库，先放过
+            fp.unlink()
+            removed += 1
+        except OSError:
+            continue
+    if removed:
+        logger.info(f"媒体孤儿文件清理: 删除 {removed} 个")
+    return removed
+
+
 def cleanup_history():
     """定时清理过期历史消息：按每个用户各自的清理设置，仅删除该用户超过保留天数的记录，清理前自动备份"""
     try:
@@ -800,8 +952,9 @@ def cleanup_history():
         uconn = _users_conn()
         users = uconn.execute("SELECT id, cleanup FROM users").fetchall()
         uconn.close()
-        hist = sqlite3.connect(str(HISTORY_DB_PATH))
+        hist = _history_conn()
         deleted = 0
+        files_removed = 0
         for u in users:
             clean = json.loads(u["cleanup"] or "{}")
             if not clean.get("enabled"):
@@ -810,12 +963,18 @@ def cleanup_history():
             if keep_days <= 0:
                 continue
             cutoff = (datetime.now(SHANGHAI_TZ) - timedelta(days=keep_days)).strftime("%Y-%m-%d %H:%M:%S")
+            # 先取出待删记录的媒体路径，再删记录，避免文件变成永久孤儿
+            media_rows = hist.execute(
+                "SELECT media_path FROM history WHERE user_id=? AND ts<? AND media_path <> ''",
+                (u["id"], cutoff)).fetchall()
             cur = hist.execute("DELETE FROM history WHERE user_id=? AND ts<?", (u["id"], cutoff))
             deleted += cur.rowcount
+            files_removed += _delete_media_files([r["media_path"] for r in media_rows])
         hist.commit()
         hist.close()
         if deleted:
-            logger.info(f"历史消息清理完成: 删除 {deleted} 条过期记录")
+            logger.info(f"历史消息清理完成: 删除 {deleted} 条过期记录、{files_removed} 个媒体文件")
+        purge_orphan_media()
     except Exception as e:
         logger.error(f"历史消息清理失败: {e}")
 
@@ -958,7 +1117,8 @@ class ShanghaiFormatter(logging.Formatter):
 
 class LogBroadcaster:
     def __init__(self):
-        self.connections: list[WebSocket] = []
+        # ws -> {"user_id": int, "is_admin": bool}；按用户隔离，避免多租户日志串线
+        self.connections: dict = {}
         self.logger = logging.getLogger("tg_monitor_web")
         self.logger.setLevel(logging.INFO)
         handler = WebLogHandler(self)
@@ -969,17 +1129,22 @@ class LogBroadcaster:
         console.setFormatter(ShanghaiFormatter("[%(asctime)s] [%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
         self.logger.addHandler(console)
 
-    async def add_connection(self, ws: WebSocket):
+    async def add_connection(self, ws: WebSocket, user_id: int, is_admin: bool = False):
         await ws.accept()
-        self.connections.append(ws)
+        self.connections[ws] = {"user_id": user_id, "is_admin": is_admin}
 
     def remove_connection(self, ws: WebSocket):
-        if ws in self.connections:
-            self.connections.remove(ws)
+        self.connections.pop(ws, None)
 
-    async def broadcast(self, message: str):
+    async def broadcast(self, message: str, user_id: Optional[int] = None):
+        """只把日志推给它的归属用户；系统级日志（user_id=None）仅管理员可见。"""
         dead = []
-        for ws in self.connections:
+        for ws, meta in list(self.connections.items()):
+            if user_id is None:
+                if not meta["is_admin"]:
+                    continue
+            elif not meta["is_admin"] and meta["user_id"] != user_id:
+                continue
             try:
                 await ws.send_text(message)
             except Exception:
@@ -998,7 +1163,7 @@ class WebLogHandler(logging.Handler):
         try:
             loop = asyncio.get_event_loop()
             if loop.is_running():
-                asyncio.ensure_future(self.broadcaster.broadcast(msg))
+                asyncio.ensure_future(self.broadcaster.broadcast(msg, _log_ctx_user.get()))
         except RuntimeError:
             pass
 
@@ -1344,7 +1509,7 @@ async def send_webhook_alerts(alert_text: str, webhooks: list, media_data: Optio
         
         # 写入推送日志
         try:
-            conn = sqlite3.connect(str(HISTORY_DB_PATH))
+            conn = _history_conn()
             conn.execute(
                 "INSERT INTO push_logs (ts, user_id, account_name, account_idx, channel_type, channel_index, status, error_message, retry_count) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (now_ts, int(user_id), account_name, account_idx, channel_type, idx, push_status, error_msg, retry_count)
@@ -1484,6 +1649,36 @@ MEDIA_CN = {
 }
 
 
+MEDIA_MAX_BYTES = 20 * 1024 * 1024   # 单条媒体下载上限 20MB，超出只留文本
+
+
+def media_size_guess(msg) -> int:
+    """不下载，先从消息元数据估算媒体大小（拿不到返回 0）"""
+    try:
+        if msg.document and getattr(msg.document, "size", None):
+            return int(msg.document.size)
+        if msg.sticker and getattr(msg.sticker, "size", None):
+            return int(msg.sticker.size)
+        if msg.photo and msg.photo.sizes:
+            sizes = [getattr(s, "size", 0) or 0 for s in msg.photo.sizes]
+            if sizes:
+                return int(max(sizes))
+    except Exception:
+        return 0
+    return 0
+
+
+def media_too_large(msg, account_name: str = "") -> bool:
+    """媒体是否超过上限。download_media(file=bytes) 是全量进内存，必须先拦。"""
+    size = media_size_guess(msg)
+    if size > MEDIA_MAX_BYTES:
+        logger.warning(
+            f"[{account_name}] 媒体 {size / 1024 / 1024:.1f}MB 超过 "
+            f"{MEDIA_MAX_BYTES // 1024 // 1024}MB 上限，跳过下载（仅记录文本）")
+        return True
+    return False
+
+
 def detect_media_type(msg) -> str:
     """判断消息媒体类型，返回内部英文类型"""
     if msg.photo:
@@ -1621,18 +1816,40 @@ class AsyncMonitor:
             kwargs["proxy"] = proxy_tuple
         return TelegramClient(**kwargs)
 
+    def _reload_snapshot(self) -> bool:
+        """从库里重新读取本账号的最新配置。
+
+        监控协程启动时拿到的是配置快照，用户在网页上改规则/代理后不重启
+        监控就永远不生效。每轮重连前刷新一次，改完最多等下次重连即生效。
+        """
+        try:
+            owner = get_user_by_id(self.user_id)
+            if owner is None:
+                return False
+            accounts = get_user_config(owner).get("accounts") or []
+            if 0 <= self.account_idx < len(accounts):
+                self.account = accounts[self.account_idx]
+                return True
+        except Exception as e:
+            logger.warning(f"[监控] 刷新账号配置失败: {e}")
+        return False
+
+    def _effective_interval(self) -> int:
+        """自动重启间隔：账号级优先，其次用户全局默认；0=关闭"""
+        interval = int(self.account.get("restart_interval") or 0)
+        if interval > 0:
+            return interval
+        owner = get_user_by_id(self.user_id)
+        if owner is not None:
+            return int((get_user_config(owner).get("monitor") or {}).get("restart_interval") or 0)
+        return 0
+
     async def start(self):
+        _log_ctx_user.set(self.user_id)   # 本协程内所有日志都归属该用户
         account_name = self.account.get("remark", "未知")
-        webhooks = get_user_webhooks(self.user_id)
         self._stop_event.clear()
         retry_delay = 5
-        # 自动重启间隔：账号级优先，其次用户全局默认；0=关闭
-        self._restart_interval = int(self.account.get("restart_interval") or 0)
-        if self._restart_interval <= 0:
-            owner = get_user_by_id(self.user_id)
-            if owner is not None:
-                user_cfg = get_user_config(owner)
-                self._restart_interval = int((user_cfg.get("monitor") or {}).get("restart_interval") or 0)
+        self._restart_interval = self._effective_interval()
         if self._restart_interval and self._restart_interval > 0:
             logger.info(f"[{account_name}] 自动重启间隔: {self._restart_interval}分钟")
 
@@ -1647,6 +1864,11 @@ class AsyncMonitor:
         logger.info(f"[{account_name}] 更新流看门狗: {stale_sec//60} 分钟无更新即强制重连")
 
         while not self._stop_event.is_set():
+            # 每轮重连前刷新配置：规则/代理/webhook 改动无需重启进程即可生效
+            self._reload_snapshot()
+            self._restart_interval = self._effective_interval()
+            account_name = self.account.get("remark", account_name)
+            webhooks = get_user_webhooks(self.user_id)
             self.client = self.build_client()
             rules = self.account.get("rules", [])
 
@@ -1732,7 +1954,7 @@ class AsyncMonitor:
                         # 下载媒体（用于 Webhook 推送 + 网页展示存档）
                         media_data = None
                         media_path = ""
-                        if has_media:
+                        if has_media and not media_too_large(msg, account_name):
                             try:
                                 # 检查贴纸类型：动态贴纸(TGS)尝试转换为GIF
                                 sticker_mime = ""
@@ -1787,7 +2009,8 @@ class AsyncMonitor:
                                     # 存到本地 media 目录，供网页展示
                                     media_dir = BASE_DIR / "media"
                                     media_dir.mkdir(parents=True, exist_ok=True)
-                                    fname = f"{msg.id}_{int(datetime.now().timestamp())}{ext}"
+                                    # 随机文件名：旧版 msg.id_时间戳 可枚举，等于把私密媒体挂在公网
+                                    fname = f"{secrets.token_hex(16)}{ext}"
                                     (media_dir / fname).write_bytes(file_bytes_val)
                                     media_path = f"/media/{fname}"
                                     media_data = {"bytes": file_bytes_val, "filename": f"telegram{ext}", "media_type": media_type, "sticker_mime": sticker_mime}
@@ -1865,14 +2088,15 @@ class AsyncMonitor:
                         media_type = detect_media_type(msg)
                         media_data = None
                         media_path = ""
-                        if media_type:
+                        if media_type and not media_too_large(msg, account_name):
                             try:
                                 file_bytes_val = await self.client.download_media(msg, file=bytes)
                                 if isinstance(file_bytes_val, bytes) and file_bytes_val:
                                     media_dir = BASE_DIR / "media"
                                     media_dir.mkdir(parents=True, exist_ok=True)
                                     ext = media_ext(msg, media_type)
-                                    fname = f"{msg.id}_{int(datetime.now().timestamp())}{ext}"
+                                    # 随机文件名：旧版 msg.id_时间戳 可枚举，等于把私密媒体挂在公网
+                                    fname = f"{secrets.token_hex(16)}{ext}"
                                     (media_dir / fname).write_bytes(file_bytes_val)
                                     media_path = f"/media/{fname}"
                                     media_data = {"bytes": file_bytes_val, "filename": f"telegram{ext}", "media_type": media_type, "sticker_mime": ""}
@@ -2007,6 +2231,20 @@ class MonitorManager:
         logger.info(f"[{accounts[account_idx].get('remark', '')}] 监控任务已创建 (user={user_id})")
         return {"status": "started"}
 
+    async def restart_if_running(self, user_id: int, account_idx: int):
+        """配置变更后让监控立刻生效（原本必须手动重启才吃新规则）"""
+        if not self.is_running(user_id, account_idx):
+            return {"status": "not_running"}
+        await self.stop_monitor(user_id, account_idx)
+        await asyncio.sleep(0.2)
+        try:
+            res = await self.start_monitor(user_id, account_idx)
+            logger.info(f"[监控] 账号[{account_idx}] 配置变更，已自动重载")
+            return res
+        except Exception as e:
+            logger.error(f"[监控] 账号[{account_idx}] 重载失败: {e}")
+            return {"status": "error", "message": str(e)}
+
     async def stop_monitor(self, user_id: int, account_idx: int):
         key = self._key(user_id, account_idx)
         if key in self.monitors:
@@ -2085,8 +2323,53 @@ monitor_mgr = MonitorManager()
 # ============================================================
 app = FastAPI(title="Telegram 监控管理后台", version="2.0.0")
 
+SESSION_COOKIE_MAX_AGE = 7 * 24 * 3600   # 会话有效期 7 天（原先前端写死 1 年）
 
-@app.on_event("startup")
+
+def _is_https(request: Request) -> bool:
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    return proto == "https" or request.url.scheme == "https"
+
+
+def _set_session_cookie(response: Response, request: Request, token: str):
+    """服务端下发会话 Cookie：HttpOnly 防 XSS 窃取，SameSite=Lax 防 CSRF。"""
+    response.set_cookie(
+        key="session_token",
+        value=token,
+        max_age=SESSION_COOKIE_MAX_AGE,
+        httponly=True,
+        samesite="lax",
+        secure=_is_https(request),
+        path="/",
+    )
+
+
+def _clear_session_cookie(response: Response):
+    response.delete_cookie("session_token", path="/")
+
+
+@app.middleware("http")
+async def _bind_log_user(request: Request, call_next):
+    """把当前请求的日志绑定到其所属用户，保证实时日志不串到别人屏幕上。"""
+    uid = None
+    token = request.cookies.get("session_token", "")
+    if token:
+        try:
+            uid = get_user_id_by_token(token)
+        except Exception:
+            uid = None
+    ctx = _log_ctx_user.set(uid)
+    try:
+        response = await call_next(request)
+    finally:
+        _log_ctx_user.reset(ctx)
+    # 基础安全响应头（不改变功能，只减少浏览器侧攻击面）
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    return response
+
+
 async def _auto_start_monitors():
     """服务启动后自动恢复监控。
 
@@ -2132,6 +2415,16 @@ async def _auto_start_monitors():
                 logger.warning(f"[自动恢复] 用户{u['id']} 账号[{idx}] 启动异常: {e}")
     logger.info(f"[自动恢复] 已自动恢复 {ok} 个账号的监控（跳过 {skipped} 个）")
 
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """替代已废弃的 @app.on_event("startup")"""
+    await _auto_start_monitors()
+    yield
+
+
+app.router.lifespan_context = _lifespan
+
 # ============================================================
 # Auth API - 登录登出
 # ============================================================
@@ -2158,8 +2451,53 @@ def user_count() -> int:
         conn.close()
 
 
+# ============================================================
+# 登录失败节流：同一 IP + 用户名连续失败即临时锁定，防止无限撞库
+# ============================================================
+_login_fail: dict = {}          # key -> {"count": int, "locked_until": float}
+_login_fail_lock = threading.Lock()
+LOGIN_MAX_FAILS = 5
+LOGIN_LOCK_SECONDS = 15 * 60
+
+
+def _throttle_key(request: Request, username: str) -> str:
+    return f"{get_client_ip(request)}|{(username or '').lower()}"
+
+
+def _login_locked_for(key: str) -> int:
+    """返回剩余锁定秒数，0 表示未锁定"""
+    with _login_fail_lock:
+        state = _login_fail.get(key)
+        if not state:
+            return 0
+        if not state["locked_until"]:
+            return 0          # 尚未触发锁定：保留失败计数，不能清掉
+        remain = int(state["locked_until"] - time.time())
+        if remain <= 0:
+            _login_fail.pop(key, None)
+            return 0
+        return remain
+
+
+def _record_login_failure(key: str):
+    with _login_fail_lock:
+        now = time.time()
+        # 顺手清理过期项，避免字典无限增长
+        for k in [k for k, v in _login_fail.items() if v["locked_until"] and v["locked_until"] < now - 3600]:
+            _login_fail.pop(k, None)
+        state = _login_fail.setdefault(key, {"count": 0, "locked_until": 0})
+        state["count"] += 1
+        if state["count"] >= LOGIN_MAX_FAILS:
+            state["locked_until"] = now + LOGIN_LOCK_SECONDS
+
+
+def _clear_login_failure(key: str):
+    with _login_fail_lock:
+        _login_fail.pop(key, None)
+
+
 @app.post("/api/login")
-async def login(request: Request):
+async def login(request: Request, response: Response):
     data = await request.json()
     username = data.get("username", "").strip()
     password = data.get("password", "").strip()
@@ -2172,22 +2510,33 @@ async def login(request: Request):
         create_user(username, password, role="admin")
         user = verify_user(username, password)
         token = create_session(user["id"])
+        _set_session_cookie(response, request, token)
         log_audit(request, user["id"], username, "login_success", "首次初始化管理员登录")
         return {"status": "ok", "token": token, "username": user["username"], "role": user["role"]}
+
+    key = _throttle_key(request, username)
+    remain = _login_locked_for(key)
+    if remain:
+        log_audit(request, None, username, "login_blocked", f"连续失败过多，锁定剩余{remain}秒")
+        return {"status": "error", "message": f"尝试次数过多，请在 {remain // 60 + 1} 分钟后重试"}
+
     user = verify_user(username, password)
     if user is None:
+        _record_login_failure(key)
         log_audit(request, None, username, "login_failed", "用户名或密码错误")
         return {"status": "error", "message": "用户名或密码错误"}
     if user["banned"]:
         log_audit(request, user["id"], username, "login_failed", f"账号已封禁：{user['ban_reason'] or '未填写'}")
         return {"status": "error", "message": f"账号已被封禁，无法登录。原因：{user['ban_reason'] or '未填写'}"}
+    _clear_login_failure(key)
     token = create_session(user["id"])
+    _set_session_cookie(response, request, token)
     log_audit(request, user["id"], username, "login_success", "登录成功")
     return {"status": "ok", "token": token, "username": user["username"], "role": user["role"]}
 
 
 @app.post("/api/setup")
-async def setup(request: Request):
+async def setup(request: Request, response: Response):
     data = await request.json()
     username = data.get("username", "").strip()
     password = data.get("password", "").strip()
@@ -2200,6 +2549,7 @@ async def setup(request: Request):
     else:
         return {"status": "error", "message": "系统已初始化"}
     token = create_session(get_user_by_username(username)["id"])
+    _set_session_cookie(response, request, token)
     return {"status": "ok", "token": token, "message": "管理员账号设置成功"}
 
 
@@ -2211,13 +2561,14 @@ async def public_registration_status():
 
 
 @app.post("/api/logout")
-async def logout(request: Request):
+async def logout(request: Request, response: Response):
     token = request.cookies.get("session_token", "")
     if token:
         user = get_user_by_token(token)
         if user:
             log_audit(request, user["id"], user["username"], "logout", "用户登出")
         delete_session(token)
+    _clear_session_cookie(response)
     return {"status": "ok"}
 
 
@@ -2225,7 +2576,7 @@ async def logout(request: Request):
 # API - 用户注册 / 管理员用户管理
 # ============================================================
 @app.post("/api/register")
-async def register(request: Request):
+async def register(request: Request, response: Response):
     if verify_session(request):
         return {"status": "error", "message": "请先退出当前账号"}
     # 检查注册开关
@@ -2249,6 +2600,7 @@ async def register(request: Request):
     new_user = get_user_by_username(username)
     log_audit(request, new_user["id"], username, "register", "用户注册成功")
     token = create_session(new_user["id"])
+    _set_session_cookie(response, request, token)
     return {"status": "ok", "token": token, "username": username, "role": "user"}
 
 
@@ -2269,7 +2621,7 @@ def _count_user_resources(user_id: int) -> dict:
     rule_cnt = sum(len(a.get("rules", [])) for a in cfg["accounts"])
     hist_cnt = 0
     try:
-        hist = sqlite3.connect(str(HISTORY_DB_PATH))
+        hist = _history_conn()
         row = hist.execute("SELECT COUNT(*) FROM history WHERE user_id = ?", (int(user_id),)).fetchone()
         hist_cnt = row[0] if row else 0
         hist.close()
@@ -2370,7 +2722,7 @@ async def admin_overview(request: Request):
         total_accounts += len(accs)
         total_rules += sum(len(a.get("rules", [])) for a in accs)
     # 消息总量 / 推送量
-    hist = sqlite3.connect(str(HISTORY_DB_PATH))
+    hist = _history_conn()
     try:
         total_msgs = hist.execute("SELECT COUNT(*) FROM history").fetchone()[0]
         today = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
@@ -2398,7 +2750,7 @@ async def get_user_detail(user_id: int, request: Request):
     # 最近推送（表结构或数据异常时降级为空列表，避免详情页 500）
     recent_pushes, recent_msgs = [], []
     try:
-        hist = sqlite3.connect(str(HISTORY_DB_PATH))
+        hist = _history_conn()
         try:
             recent_pushes = [dict(r) for r in hist.execute(
                 "SELECT ts, account_name, channel_type, status, error_message FROM push_logs "
@@ -2572,7 +2924,7 @@ def change_password(request: Request, data: dict):
 async def get_audit_logs(request: Request, page: int = 1, page_size: int = 50,
                           action: str = "", username: str = ""):
     _require_admin(request)
-    conn = sqlite3.connect(str(USERS_DB_PATH))
+    conn = _users_conn()
     conn.row_factory = sqlite3.Row
     try:
         conditions = []
@@ -2599,7 +2951,7 @@ async def get_audit_logs(request: Request, page: int = 1, page_size: int = 50,
 @app.get("/api/admin/audit/stats")
 async def get_audit_stats(request: Request):
     _require_admin(request)
-    conn = sqlite3.connect(str(USERS_DB_PATH))
+    conn = _users_conn()
     try:
         # 最近24小时失败登录次数
         failed_24h = conn.execute(
@@ -2645,20 +2997,6 @@ async def update_admin_settings(request: Request, data: dict):
 
 
 # 全局鉴权中间件：未登录跳转 /login
-from fastapi import Depends
-from fastapi.security import APIKeyCookie
-from typing import Callable
-
-security = APIKeyCookie(name="session_token", auto_error=False)
-
-async def require_auth(request: Request, token: str = Depends(security)) -> bool:
-    user = get_user_by_token(token)
-    if user is None:
-        return False
-    request.state.current_user = _row_to_dict(user)
-    return True
-
-
 # ============================================================
 # API - 账号管理
 # ============================================================
@@ -2706,7 +3044,7 @@ def add_account(request: Request, data: dict):
 
 
 @app.put("/api/accounts/{idx}")
-def update_account(idx: int, request: Request, data: dict):
+async def update_account(idx: int, request: Request, data: dict):
     user_id, cfg = _user_ctx(request)
     accounts = cfg["accounts"]
     if idx < 0 or idx >= len(accounts):
@@ -2726,20 +3064,40 @@ def update_account(idx: int, request: Request, data: dict):
         acc["restart_interval"] = int(data.get("restart_interval") or 0)
     save_user_config(user_id, cfg)
     logger.info(f"[user={user_id}] 已更新账号: {acc.get('remark', '')}")
+    # 在跑的话立刻重载，否则用户改完代理/间隔还得手动重启才生效
+    await monitor_mgr.restart_if_running(user_id, idx)
     return {"status": "ok"}
 
 
 @app.delete("/api/accounts/{idx}")
-def delete_account(idx: int, request: Request):
+async def delete_account(idx: int, request: Request):
     user_id, cfg = _user_ctx(request)
     accounts = cfg["accounts"]
     if idx < 0 or idx >= len(accounts):
         raise HTTPException(404, "账号不存在")
-    # 先停止监控
-    asyncio.create_task(monitor_mgr.stop_monitor(user_id, idx))
+
+    # 账号以列表下标为身份：删掉前面的账号会让后面的整体前移一位，
+    # 若不同步平移监控 key，正在跑的监控就会挂到错误的账号上。
+    running = [i for i in range(len(accounts)) if monitor_mgr.is_running(user_id, i)]
+    for i in running:
+        try:
+            await monitor_mgr.stop_monitor(user_id, i)
+        except Exception as e:
+            logger.warning(f"[监控] 删除账号前停止监控[{i}]失败: {e}")
+
+    removed_name = accounts[idx].get("remark", "")
     del accounts[idx]
     save_user_config(user_id, cfg)
-    logger.info(f"[user={user_id}] 已删除账号: {accounts[idx].get('remark', '') if idx < len(accounts) else ''}")
+    logger.info(f"[user={user_id}] 已删除账号: {removed_name}")
+
+    for i in running:
+        if i == idx:
+            continue
+        new_idx = i - 1 if i > idx else i
+        try:
+            await monitor_mgr.start_monitor(user_id, new_idx)
+        except Exception as e:
+            logger.warning(f"[监控] 账号下标平移后重启监控[{new_idx}]失败: {e}")
     return {"status": "ok"}
 
 
@@ -2948,7 +3306,7 @@ def list_rules(idx: int, request: Request):
 
 
 @app.post("/api/accounts/{idx}/rules")
-def add_rule(idx: int, request: Request, data: dict):
+async def add_rule(idx: int, request: Request, data: dict):
     user_id, cfg = _user_ctx(request)
     accounts = cfg["accounts"]
     if idx < 0 or idx >= len(accounts):
@@ -2971,11 +3329,12 @@ def add_rule(idx: int, request: Request, data: dict):
     accounts[idx].setdefault("rules", []).append(rule)
     save_user_config(user_id, cfg)
     logger.info(f"[user={user_id}] 已添加规则: {rule['remark']}")
+    await monitor_mgr.restart_if_running(user_id, idx)
     return {"status": "ok"}
 
 
 @app.put("/api/accounts/{idx}/rules/{ridx}")
-def update_rule(idx: int, ridx: int, request: Request, data: dict):
+async def update_rule(idx: int, ridx: int, request: Request, data: dict):
     user_id, cfg = _user_ctx(request)
     accounts = cfg["accounts"]
     if idx < 0 or idx >= len(accounts):
@@ -2993,11 +3352,12 @@ def update_rule(idx: int, ridx: int, request: Request, data: dict):
     accounts[idx]["rules"] = rules
     save_user_config(user_id, cfg)
     logger.info(f"[user={user_id}] 已更新规则: {rule.get('remark', '')}")
+    await monitor_mgr.restart_if_running(user_id, idx)
     return {"status": "ok"}
 
 
 @app.delete("/api/accounts/{idx}/rules/{ridx}")
-def delete_rule(idx: int, ridx: int, request: Request):
+async def delete_rule(idx: int, ridx: int, request: Request):
     user_id, cfg = _user_ctx(request)
     accounts = cfg["accounts"]
     if idx < 0 or idx >= len(accounts):
@@ -3009,6 +3369,7 @@ def delete_rule(idx: int, ridx: int, request: Request):
     accounts[idx]["rules"] = rules
     save_user_config(user_id, cfg)
     logger.info(f"[user={user_id}] 已删除规则 #{ridx}")
+    await monitor_mgr.restart_if_running(user_id, idx)
     return {"status": "ok"}
 
 
@@ -3113,7 +3474,7 @@ def run_cleanup_now(request: Request):
         keep_days = 30
     backup_database()
     cutoff = (datetime.now(SHANGHAI_TZ) - timedelta(days=keep_days)).strftime("%Y-%m-%d %H:%M:%S")
-    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    conn = _history_conn()
     try:
         cur = conn.execute("DELETE FROM history WHERE user_id = ? AND ts < ?", (user_id, cutoff))
         deleted = cur.rowcount
@@ -3133,7 +3494,7 @@ def run_cleanup_now(request: Request):
 def get_history(request: Request, account_idx: int = -1, page: int = 1, page_size: int = 20,
                 date_from: str = "", date_to: str = "", keyword: str = "", star_only: int = 0):
     user_id, _ = _user_ctx(request)
-    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    conn = _history_conn()
     conditions = ["user_id = ?"]
     params = [user_id]
     if account_idx >= 0:
@@ -3197,7 +3558,7 @@ def get_history(request: Request, account_idx: int = -1, page: int = 1, page_siz
 @app.get("/api/history/export")
 def export_history(request: Request, account_idx: int = -1, date_from: str = "", date_to: str = "", keyword: str = ""):
     user_id, _ = _user_ctx(request)
-    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    conn = _history_conn()
     conditions = ["user_id = ?"]
     params = [user_id]
     if account_idx >= 0:
@@ -3239,7 +3600,7 @@ def export_history(request: Request, account_idx: int = -1, date_from: str = "",
 def toggle_history_star(history_id: int, request: Request):
     """切换历史消息的收藏状态，返回切换后的状态"""
     user_id, _ = _user_ctx(request)
-    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    conn = _history_conn()
     row = conn.execute("SELECT starred FROM history WHERE id = ? AND user_id = ?", (history_id, user_id)).fetchone()
     if row is None:
         conn.close()
@@ -3258,7 +3619,7 @@ def toggle_history_star(history_id: int, request: Request):
 def get_stats(request: Request):
     """获取统计数据：概览、趋势、账号分布、群组排行（按当前用户隔离）"""
     user_id, cfg = _user_ctx(request)
-    conn = sqlite3.connect(str(HISTORY_DB_PATH))
+    conn = _history_conn()
     
     # 1. 概览数据
     today = datetime.now(SHANGHAI_TZ).strftime("%Y-%m-%d")
@@ -3398,7 +3759,7 @@ async def ws_logs(websocket: WebSocket):
     if user is None or user["banned"]:
         await websocket.close(code=1008)
         return
-    await broadcaster.add_connection(websocket)
+    await broadcaster.add_connection(websocket, user["id"], user["role"] == "admin")
     try:
         while True:
             await websocket.receive_text()  # 保持连接，接收心跳
@@ -3560,15 +3921,43 @@ async def logo():
     return HTMLResponse("")
 
 
+def _media_owner(media_path: str):
+    """根据 media_path 反查这条媒体属于哪个用户（找不到返回 None）"""
+    conn = _history_conn()
+    try:
+        row = conn.execute(
+            "SELECT user_id FROM history WHERE media_path = ? LIMIT 1", (media_path,)
+        ).fetchone()
+        return row["user_id"] if row else None
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+
+
 @app.get("/media/{filename}")
-async def get_media(filename: str):
-    """提供监控消息媒体文件（图片/视频/文件）"""
-    media_dir = BASE_DIR / "media"
+async def get_media(filename: str, request: Request, share: str = ""):
+    """提供监控消息媒体文件。需登录且属于本人，或携带有效的分享 token。"""
+    media_dir = (BASE_DIR / "media").resolve()
     file_path = (media_dir / filename).resolve()
-    # 防目录穿越
-    if not str(file_path).startswith(str(media_dir.resolve())) or not file_path.exists():
+    # 防目录穿越：用 commonpath 判断，startswith 会被 media2 之类的兄弟目录绕过
+    try:
+        if os.path.commonpath([str(media_dir), str(file_path)]) != str(media_dir):
+            raise HTTPException(status_code=404, detail="not found")
+    except ValueError:
         raise HTTPException(status_code=404, detail="not found")
-    return FileResponse(str(file_path))
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="not found")
+
+    owner_id = _media_owner(f"/media/{filename}")
+    user = verify_session(request)
+    if user and (user["role"] == "admin" or user["id"] == owner_id):
+        return FileResponse(str(file_path))
+    if share:
+        uid = _resolve_share_token(share)
+        if uid is not None and uid == owner_id:
+            return FileResponse(str(file_path))
+    raise HTTPException(status_code=404, detail="not found")
 
 
 # ============================================================

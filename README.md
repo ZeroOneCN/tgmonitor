@@ -15,9 +15,11 @@
 | `templates/login.html` | 登录页面 |
 | `templates/setup.html` | 首次初始化管理员页面 |
 | `tg_helper.py` | 辅助工具：查 chat_id / user_id |
+| `tests/` | 核心逻辑回归测试（pytest） |
 | `config.json` | 配置文件（Web 界面自动管理） |
 | `users.db` | 用户/会话数据库（多租户，自动生成） |
 | `requirements.txt` | 依赖列表 |
+| `requirements-dev.txt` | 开发/测试依赖（生产不需要） |
 | `ecosystem.config.js` | PM2 进程管理配置 |
 | `tg-monitor.nginx.conf` | Nginx 反向代理配置示例 |
 | session_xxx.session | 登录会话文件（每个账号各一个，自动生成） |
@@ -112,6 +114,48 @@ python tg_helper.py members -c -100xxxxxxxx -n 500
 
 ```bash
 python tg_helper.py users -c -100xxxxxxxx -n 100
+```
+
+---
+
+## 安全与稳定性说明
+
+### 会话与密码
+
+- 密码使用 **PBKDF2-HMAC-SHA256（26 万次迭代）** 存储。旧版本的 `sha256(密码+盐)` 哈希在用户下次登录成功后**自动升级**，无需重置密码。
+- 会话 Cookie 由**服务端下发**，带 `HttpOnly`（JS 无法读取，防 XSS 窃取）、`SameSite=Lax`（防 CSRF）、HTTPS 环境下自动加 `Secure`，有效期 7 天。
+- 登录失败 **5 次锁定 15 分钟**（按 IP + 用户名计数），事件写入安全审计日志。
+
+### 多租户数据隔离
+
+- 实时日志 WebSocket **按用户过滤**：每个用户只能看到自己账号的监控日志，系统级日志仅管理员可见。
+- 媒体文件（`/media/xxx`）需登录且**属于本人**才能访问；分享页访客需携带有效分享 token。
+- 媒体文件名使用**随机 32 位十六进制**，不可枚举（旧版本是 `消息ID_时间戳`）。
+- 分享页鉴权密钥首次运行随机生成并持久化，不再硬编码在源码里。
+
+### 数据库
+
+- SQLite 统一启用 **WAL 模式 + busy_timeout 15s**，多账号并发写入不再出现 `database is locked`。
+- 配置写入串行化，避免并发保存互相覆盖。
+- 清理历史消息时**同时删除对应媒体文件**，并定期清理无引用的孤儿文件。
+
+### 监控行为
+
+- 单条媒体超过 **20MB** 自动跳过下载（仅保留文本），防止大文件占满内存。
+- 修改账号、规则、代理后，若监控正在运行会**自动重载**，无需手动重启。
+- 删除账号后，其余账号的监控会按新下标自动重建，不会挂错账号。
+- 服务重启后自动恢复监控（可用环境变量关闭）：
+
+```bash
+# 关闭「重启后自动恢复监控」
+export TG_AUTO_START_MONITORS=0
+```
+
+### 测试
+
+```bash
+pip install -r requirements-dev.txt
+pytest -q
 ```
 
 ---

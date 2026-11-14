@@ -204,8 +204,15 @@ function openMedia(type, path) {
 }
 function closeMedia() { document.getElementById('media-mask').classList.remove('active'); }
 
+function mediaUrl(p) {
+  // 媒体接口已加归属校验：分享访客必须带分享 token 才能取到文件
+  if (!p) return '';
+  const sep = p.indexOf('?') >= 0 ? '&' : '?';
+  return `${p}${sep}share=${encodeURIComponent(TOKEN)}`;
+}
+
 function mediaThumb(item) {
-  const p = item.media_path;
+  const p = mediaUrl(item.media_path);
   if (!p) return '';
   if (item.media_type === 'image' || item.media_type === 'sticker' || item.media_type === 'gif') {
     return `<div class="msg-media"><img src="${escHtml(p)}" alt="图片" onclick="openMedia('image','${escHtml(p)}')"></div>`;
